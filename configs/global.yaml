@@ -1,0 +1,7 @@
+seed: 42
+device: auto   # "cuda", "cpu", or "auto"
+dtype: float32
+
+paths:
+  results_dir: results
+  data_dir: data

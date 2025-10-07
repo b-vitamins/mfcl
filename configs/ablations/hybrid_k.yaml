@@ -1,0 +1,28 @@
+# Hybrid head–tail splice ablation
+seed: 42
+device: auto
+dtype: float32
+results_dir: results
+
+dataset:
+  name: imagenet_val_clip_vitb16_demo
+  x_path: data/embeddings/clip_vitb16/imagenet_val_X.pt
+  y_path: data/embeddings/clip_vitb16/imagenet_val_Y.pt
+
+grid:
+  objective: loob              # or 'infonce'
+  N: [2048, 8192]
+  tau: [0.05, 0.10, 0.25]
+  covariance: ["diag", "full"]
+  shrinkage: [0.0, 0.05]
+  hybrid_k: [32, 64]
+
+batches_per_condition: 50
+chunk_size: 4096
+
+hybrid:
+  gap_trigger: 0.5   # apply hybrid only when gap > 0.5; set null to always apply
+
+tost:
+  n_boot: 200
+  alpha: 0.10

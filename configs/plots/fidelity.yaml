@@ -1,0 +1,5 @@
+errors_csv: results/*fidelity*/fidelity_errors.csv
+outdir: results/figures
+dataset: imagenet_val_clip_vitb16_demo
+N: 8192
+objective: loob

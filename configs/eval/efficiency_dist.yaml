@@ -1,0 +1,21 @@
+# Multi-device strong scaling (run with torchrun)
+seed: 42
+dtype: float32
+results_dir: results
+
+dataset:
+  name: imagenet_val_clip_vitb16_demo
+  x_path: data/embeddings/clip_vitb16/imagenet_val_X.pt
+  y_path: data/embeddings/clip_vitb16/imagenet_val_Y.pt
+
+grid:
+  N: [8192, 16384]
+  tau: [0.10]
+  methods: ["exact", "mf2"]
+  covariance: ["diag", "full"]
+  shrinkage: [0.0, 0.05]
+  ridge: 1e-5
+
+chunk_size: 4096
+warmup: 20
+reps: 50

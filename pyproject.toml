@@ -1,0 +1,35 @@
+[project]
+name = "mfcl"
+version = "0.1.0"
+description = "Mean-field contrastive learning: exact baselines and approximations"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Ayan", email = "you@example.com" }
+]
+license = { text = "MIT" }
+dependencies = [
+  "torch>=2.1.0",
+  "numpy>=1.24.0",
+  "pandas>=2.0.0",
+  "typer>=0.9.0",
+  "PyYAML>=6.0.0",
+  "matplotlib>=3.7.0"
+]
+
+[project.scripts]
+mfcl = "mfcl.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ['src']
+include = ['mfcl*']
+
+[tool.setuptools."package-dir"]
+'' = 'src'
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.isort]
+profile = 'black'

@@ -1,0 +1,20 @@
+seed: 42
+device: auto
+dtype: float32
+results_dir: results
+
+dataset:
+  name: imagenet_val_clip_vitb16_demo
+  x_path: data/embeddings/clip_vitb16/imagenet_val_X.pt
+  y_path: data/embeddings/clip_vitb16/imagenet_val_Y.pt
+
+grid:
+  objective: infonce
+  N: [2048, 8192]
+  tau: [0.05, 0.10, 0.25, 0.50]
+  covariance: full
+  shrinkage: 0.05
+  lowrank_r: 64
+
+batches_per_condition: 50
+spectral_r: [8, 16, 32]

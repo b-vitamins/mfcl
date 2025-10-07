@@ -1,0 +1,4 @@
+dataset: imagenet_val_clip_vitb16_demo
+objective: infonce
+N: 8192
+taus: [0.10, 0.25, 0.50]

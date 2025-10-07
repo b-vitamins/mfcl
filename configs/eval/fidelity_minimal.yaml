@@ -1,0 +1,21 @@
+# Minimal fidelity config — edit paths before running
+seed: 42
+device: auto
+dtype: float32
+results_dir: results
+
+dataset:
+  name: imagenet_val_clip_vitb16_demo
+  # Option A: separate files (both 2D [N, d])
+  x_path: data/embeddings/clip_vitb16/imagenet_val_X.pt
+  y_path: data/embeddings/clip_vitb16/imagenet_val_Y.pt
+  # Option B (alternative): single file with dict {'X': ..., 'Y': ...}
+  # x_path: data/embeddings/clip_vitb16/imagenet_val_pairs.pt
+
+grid:
+  objective: loob       # 'loob' or 'infonce'
+  N: [512, 2048]        # batch sizes
+  tau: [0.10, 0.25, 0.50]  # temperatures
+
+batches_per_condition: 50
+chunk_size: 4096

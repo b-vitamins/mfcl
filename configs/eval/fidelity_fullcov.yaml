@@ -1,0 +1,30 @@
+# Fidelity sweep comparing exact vs MF2 (iso/diag/full with shrinkage)
+seed: 42
+device: auto
+dtype: float32
+results_dir: results
+
+dataset:
+  name: imagenet_val_clip_vitb16_demo
+  # Provide either separate X/Y files or a single dict file with {'X','Y'}
+  x_path: data/embeddings/clip_vitb16/imagenet_val_X.pt
+  y_path: data/embeddings/clip_vitb16/imagenet_val_Y.pt
+
+grid:
+  objective: loob             # 'loob' or 'infonce'
+  N: [2048, 8192]
+  tau: [0.05, 0.10, 0.25, 0.50, 1.0]
+  covariance: ["iso", "diag", "full"]
+  shrinkage: [0.0, 0.05]      # only used for 'full'
+
+batches_per_condition: 50
+chunk_size: 4096
+
+tost:
+  n_boot: 200
+  alpha: 0.10
+  # Optional overrides for epsilon per tau; else defaults (0.04 at 0.05; 0.02 at 0.10; 0.01 otherwise)
+  # eps_by_tau:
+  #   "0.05": 0.04
+  #   "0.10": 0.02
+  #   "0.25": 0.01
