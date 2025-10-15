@@ -14,10 +14,12 @@ class ImageListDataset(Dataset):
     """Dataset from explicit file list; labels optional/implied by subdirs.
 
     For SSL pretraining, transforms typically return a dict of multiple views.
-    This dataset returns ``(transform(img), idx)`` for bookkeeping.
+    This dataset returns ``(transform(img), idx)`` for bookkeeping. No label
+    inference is attempted for SSL; evaluation should provide label-aware
+    datasets or transforms.
     """
 
-    def __init__(self, root: str, file_list: str, transform: Optional[Callable[[Image.Image], Dict[str, object]]] = None):
+    def __init__(self, root: str, file_list: str, transform: Optional[Callable[[Image.Image], object]] = None):
         """Construct dataset from a file list.
 
         Args:
@@ -55,7 +57,7 @@ class ImageListDataset(Dataset):
         """
         path = self.paths[idx]
         if not os.path.exists(path):
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f"Image not found at index {idx}: {path}")
         img = Image.open(path).convert("RGB")
         if self.transform is None:
             return {"img": img}, idx
@@ -69,9 +71,9 @@ def build_imagenet_datasets(
     root: str,
     train_list: Optional[str],
     val_list: Optional[str],
-    train_transform: Callable[[Image.Image], Dict[str, object]],
-    val_transform: Optional[Callable[[Image.Image], Dict[str, object]]] = None,
-):
+    train_transform: Callable[[Image.Image], object],
+    val_transform: Optional[Callable[[Image.Image], object]] = None,
+) -> Tuple[Dataset, Optional[Dataset]]:
     """Build train and optional val datasets for ImageNet-1K.
 
     Args:

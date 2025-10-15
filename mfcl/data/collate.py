@@ -71,6 +71,9 @@ def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCr
     code_crops = f.get("code_crops")
     if not isinstance(code_crops, tuple) or len(code_crops) != 2:
         raise ValueError("sample['code_crops'] must be a tuple of length 2")
+    a, b = code_crops
+    if not (0 <= a < n_crops and 0 <= b < n_crops and a != b):
+        raise ValueError("code_crops must be distinct indices within [0, n_crops)")
     for sample, _ in batch[1:]:
         s = cast(MultiCropSample, sample)
         if s.get("code_crops") != code_crops:
@@ -88,6 +91,8 @@ def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCr
             if i >= len(crops):
                 raise ValueError("inconsistent number of crops across batch")
             t = crops[i]
+            if not isinstance(t, torch.Tensor):
+                raise TypeError(f"crop at position {i} must be a Tensor")
             if size_ref is None:
                 size_ref = tuple(t.shape)
             elif tuple(t.shape) != size_ref:
