@@ -11,7 +11,8 @@ import torch.nn.functional as F
 
 def _offdiag(M: torch.Tensor) -> torch.Tensor:
     n, m = M.shape
-    assert n == m
+    if n != m:
+        raise ValueError("covariance matrix must be square to extract off-diagonal entries")
     return M.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 

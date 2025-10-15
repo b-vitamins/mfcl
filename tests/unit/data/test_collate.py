@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from mfcl.data.collate import collate_pair, collate_multicrop, collate_linear
@@ -29,6 +30,17 @@ def test_collate_multicrop_shapes_and_mismatch():
         assert False, "Expected ValueError"
     except ValueError:
         pass
+
+
+def test_collate_multicrop_validates_structure():
+    with pytest.raises(ValueError):
+        collate_multicrop([])
+    malformed = {"crops": "not-a-list", "code_crops": (0, 1)}
+    with pytest.raises(TypeError):
+        collate_multicrop([(malformed, 0)])
+    malformed_code = {"crops": [torch.randn(3, 4, 4)], "code_crops": (0, 1, 2)}
+    with pytest.raises(ValueError):
+        collate_multicrop([(malformed_code, 0)])
 
 
 def test_collate_linear():
