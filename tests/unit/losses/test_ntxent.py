@@ -11,7 +11,7 @@ def test_ntxent_basic_and_temp():
     assert torch.isfinite(loss1)
     loss_fn2 = NTXentLoss(temperature=0.1, normalize=True)
     loss2, _ = loss_fn2(z, z)
-    assert loss2 >= loss1 - 1e-6
+    assert loss2 <= loss1 + 1e-6
 
 
 def test_ntxent_batch_too_small():
