@@ -19,7 +19,7 @@ def knn_predict(
     Steps:
       - Compute cosine similarity between features and bank: sim = features @ bank.T
       - For each row, take top-k indices/values.
-      - Convert neighbors' labels to one-hot and weight by exp(sim / temperature).
+      - Convert neighbors' labels to one-hot and weight by softmax(sim / temperature).
       - Sum weights per class, then L1-normalize across classes.
     """
     device = features.device
@@ -37,10 +37,12 @@ def knn_predict(
     bank = F.normalize(bank, dim=1)
     sim = feats @ bank.t()  # [B,N]
     vals, idx = torch.topk(sim, k=k, dim=1)  # [B,k]
-    weights = torch.exp(vals / float(temperature))  # [B,k]
+    weights = torch.softmax(vals / float(temperature), dim=1)  # [B,k]
     neighbor_labels = bank_labels[idx]  # [B,k]
 
     C = int(bank_labels.max().item()) + 1
+    if (bank_labels < 0).any():
+        raise ValueError("bank_labels must be non-negative integer class ids")
     one_hot = F.one_hot(neighbor_labels, num_classes=C).to(weights.dtype)  # [B,k,C]
     class_votes = (one_hot * weights.unsqueeze(-1)).sum(dim=1)  # [B,C]
     class_votes = class_votes / (class_votes.sum(dim=1, keepdim=True) + 1e-12)

@@ -20,6 +20,12 @@ class SmoothedValue:
         self.count += int(n)
         self.total += float(value) * int(n)
 
+    def reset(self) -> None:
+        """Reset window and globals."""
+        self.deque.clear()
+        self.total = 0.0
+        self.count = 0
+
     @property
     def median(self) -> float:
         d = list(self.deque)

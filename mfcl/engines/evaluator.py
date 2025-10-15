@@ -59,6 +59,9 @@ class LinearProbe:
         weight_decay: float = 0.0,
         milestones: Tuple[int, int] = (30, 60),
         batch_size_override: Optional[int] = None,
+        feature_norm: bool = False,
+        amp: bool = False,
+        use_scaler: bool = False,
     ) -> None:
         self.encoder = encoder
         self.encoder.eval()
@@ -73,7 +76,10 @@ class LinearProbe:
         if batch_size_override is not None and int(batch_size_override) <= 0:
             raise ValueError("batch_size_override must be a positive integer")
         self.batch_size_override = batch_size_override
+        self.feature_norm = bool(feature_norm)
+        self.amp = bool(amp)
         self.head = nn.Linear(self.feature_dim, self.num_classes).to(self.device)
+        self.use_scaler = bool(use_scaler)
 
     def fit(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict[str, float]:
         """Train linear head and report top1/top5 on val.
@@ -95,6 +101,8 @@ class LinearProbe:
         )
         loss_meter = 0.0
         n_batches = 0
+        amp_enabled = self.amp and torch.cuda.is_available()
+        scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled and self.use_scaler)
 
         for epoch in range(1, self.epochs + 1):
             self.head.train()
@@ -102,13 +110,22 @@ class LinearProbe:
                 images = images.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
                 with torch.no_grad():
-                    feats = self.encoder(images)
+                    with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                        feats = self.encoder(images)
                     feats = feats.detach()
-                logits = self.head(feats)
-                loss = F.cross_entropy(logits, targets)
+                    if self.feature_norm:
+                        feats = torch.nn.functional.normalize(feats, dim=1)
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
-                opt.step()
+                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                    logits = self.head(feats)
+                    loss = F.cross_entropy(logits, targets)
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    opt.step()
                 loss_meter += float(loss.item())
                 n_batches += 1
             sched.step()
@@ -122,8 +139,12 @@ class LinearProbe:
             for images, targets in val_loader:
                 images = images.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
-                feats = self.encoder(images)
-                logits = self.head(feats)
+                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                    feats = self.encoder(images)
+                if self.feature_norm:
+                    feats = torch.nn.functional.normalize(feats, dim=1)
+                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                    logits = self.head(feats)
                 t1, t5 = _accuracy(logits, targets, topk=(1, 5))
                 top1_sum += t1 * images.size(0)
                 top5_sum += t5 * images.size(0)
@@ -243,6 +264,7 @@ class KNNEval:
             probs = knn_predict(
                 feats, bank_feats, bank_labels, k=self.k, temperature=self.temperature
             )
+            # _accuracy operates on logits or probabilities; kNN already outputs probabilities.
             t1, t5 = _accuracy(probs, targets, topk=(1, 5))
             top1_sum += t1 * images.size(0)
             top5_sum += t5 * images.size(0)
