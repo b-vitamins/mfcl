@@ -61,18 +61,22 @@ class NTXentLoss(nn.Module):
             z1f = F.normalize(z1f, dim=1)
             z2f = F.normalize(z2f, dim=1)
 
-        # Apply temperature as a scale factor (smaller t -> flatter -> higher loss)
-        logits_i = (z1f @ z2f.t()) * self.t  # [B,B]
+        sim = z1f @ z2f.t()
+        # Standard temperature scaling divides by tau.  Smaller temperatures
+        # sharpen the distribution and should reduce the loss when positives are
+        # strong.  Multiplying by tau would invert that behaviour, so use
+        # division and keep logits in float32 for numerical stability.
+        logits_i = sim / self.t
         logits_j = logits_i.t()
-        labels = torch.arange(B, device=z1.device)
+        labels = torch.arange(B, device=sim.device)
 
         loss_i = F.cross_entropy(logits_i, labels)
         loss_j = F.cross_entropy(logits_j, labels)
         loss = 0.5 * (loss_i + loss_j)
 
-        pos_sim = torch.diag(logits_i).mean().detach()
-        neg_mask = ~torch.eye(B, dtype=torch.bool, device=z1.device)
-        neg_sim_mean = logits_i.masked_select(neg_mask).mean().detach()
+        pos_sim = torch.diag(sim).mean().detach()
+        neg_mask = ~torch.eye(B, dtype=torch.bool, device=sim.device)
+        neg_sim_mean = sim.masked_select(neg_mask).mean().detach()
         stats = {"pos_sim": pos_sim, "neg_sim_mean": neg_sim_mean}
         return loss, stats
 
