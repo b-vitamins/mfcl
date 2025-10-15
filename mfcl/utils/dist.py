@@ -115,12 +115,18 @@ def reduce_dict(
     Returns:
         Reduced dict on every rank.
     """
+    op_normalized = op.lower()
+    if op_normalized not in {"mean", "sum"}:
+        raise ValueError("op must be 'mean' or 'sum'")
+
     if not is_dist():
         return {k: v.clone() for k, v in tensors.items()}
 
     reduced: Dict[str, torch.Tensor] = {}
     world = get_world_size()
     for k, v in tensors.items():
+        if not torch.is_tensor(v):  # pragma: no cover - defensive
+            raise TypeError(f"Value for key '{k}' must be a torch.Tensor")
         t = v.clone()
         # Use best-effort all_reduce; avoid relying on ReduceOp to ease testing/mocking.
         try:
@@ -132,7 +138,7 @@ def reduce_dict(
             except Exception:
                 # If still failing, leave tensor unchanged
                 pass
-        if op == "mean":
+        if op_normalized == "mean":
             t = t / world
         reduced[k] = t
     return reduced

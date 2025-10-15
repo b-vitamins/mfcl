@@ -121,16 +121,8 @@ class Trainer:
         if resume_path and os.path.exists(resume_path):
             state = load_checkpoint(resume_path, strict=False)
             if state:
-                try:
-                    self.method.load_state_dict(state.get("method", {}), strict=False)
-                    self.optimizer.load_state_dict(state.get("optimizer", {}))
-                    if self.scheduler and state.get("scheduler") is not None:
-                        self.scheduler.load_state_dict(state["scheduler"])  # type: ignore[arg-type]
-                    if self.scaler and state.get("scaler") is not None:
-                        self.scaler._scaler.load_state_dict(state["scaler"])  # type: ignore[attr-defined]
-                    start_epoch = int(state.get("epoch", 0)) + 1
-                except Exception:
-                    pass
+                start_epoch = max(1, int(state.get("epoch", 0)) + 1)
+                self._restore_checkpoint_state(state)
 
         self.method.train()
         try:
@@ -152,6 +144,7 @@ class Trainer:
         self.hooks.on_train_start(train_state)
 
         for epoch in range(start_epoch, epochs + 1):
+            train_state["epoch"] = epoch
             self.hooks.on_epoch_start(epoch, train_state)
             epoch_metrics = self.train_one_epoch(epoch, train_loader)
 
@@ -162,12 +155,8 @@ class Trainer:
                     "epoch": epoch,
                     "method": self.method.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
-                    "scheduler": self.scheduler.state_dict()
-                    if self.scheduler
-                    else None,
-                    "scaler": getattr(self.scaler._scaler, "state_dict", lambda: None)()
-                    if self.scaler
-                    else None,
+                    "scheduler": self.scheduler.state_dict() if self.scheduler else None,
+                    "scaler": self.scaler.state_dict() if self.scaler else None,
                     "metrics": epoch_metrics,
                 }
                 path = os.path.join(self.save_dir, f"ckpt_ep{epoch:04d}.pt")
@@ -317,6 +306,35 @@ class Trainer:
             t = [self.to_device(x) for x in obj]
             return type(obj)(t) if isinstance(obj, tuple) else t
         return obj
+
+    def _restore_checkpoint_state(self, state: Dict[str, Any]) -> None:
+        """Restore method/optimizer/scheduler/scaler state from a checkpoint."""
+
+        def _maybe(name: str, payload: Any, loader) -> None:
+            if payload in (None, {}):
+                return
+            try:
+                loader(payload)
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError(f"Failed to load {name} from checkpoint") from exc
+
+        method_state = state.get("method", {})
+        if isinstance(method_state, dict):
+            try:
+                self.method.load_state_dict(method_state, strict=False)
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError("Failed to load method state from checkpoint") from exc
+
+        opt_state = state.get("optimizer", {})
+        _maybe("optimizer", opt_state, self.optimizer.load_state_dict)
+
+        if self.scheduler is not None:
+            sched_state = state.get("scheduler", {})
+            _maybe("scheduler", sched_state, self.scheduler.load_state_dict)
+
+        if self.scaler is not None:
+            scaler_state = state.get("scaler", {})
+            _maybe("scaler", scaler_state, self.scaler.load_state_dict)
 
 
 __all__ = ["Trainer"]

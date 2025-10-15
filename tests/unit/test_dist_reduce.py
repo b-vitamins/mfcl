@@ -1,4 +1,6 @@
 import types
+
+import pytest
 import torch
 
 import mfcl.utils.dist as mdist
@@ -31,3 +33,8 @@ def test_reduce_dict_mean_and_sum_monkeypatched():
         mdist.dist = orig_dist
         mdist.is_dist = orig_is_dist  # type: ignore
         mdist.get_world_size = orig_get_ws  # type: ignore
+
+
+def test_reduce_dict_invalid_op_raises():
+    with pytest.raises(ValueError):
+        mdist.reduce_dict({"a": torch.tensor(1.0)}, op="median")
