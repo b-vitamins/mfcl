@@ -57,5 +57,22 @@ class RingQueue:
             return self.buf
         return self.buf[: self.ptr]
 
+    def __len__(self) -> int:
+        """Return the number of valid entries currently stored."""
 
-__all__ = ["RingQueue"]
+        return self.size if self.full else self.ptr
+
+    @torch.no_grad()
+    def clear(self, zero: bool = False) -> None:
+        """Reset queue to empty; optionally zero the buffer."""
+
+        self.ptr = 0
+        self.full = False
+        if zero:
+            self.buf.zero_()
+
+
+MoCoQueue = RingQueue
+
+
+__all__ = ["RingQueue", "MoCoQueue"]

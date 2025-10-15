@@ -7,7 +7,7 @@ scaling across CUDA-enabled and CPU-only environments.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any, Dict, Optional
+from typing import Any, ContextManager, Dict, Optional
 
 import torch
 
@@ -45,8 +45,12 @@ class AmpScaler:
         else:
             self._scaler = None
 
-    def autocast(self):
-        """Return a context manager for autocast (no-op when disabled)."""
+    def autocast(self) -> ContextManager:
+        """Return an autocast context manager (CPU-safe no-op).
+
+        Gradient clipping should run after ``unscale_`` is called so that the
+        gradients are in their true scale prior to clipping.
+        """
         if self._enabled:
             try:
                 return torch.amp.autocast("cuda")  # type: ignore[attr-defined]
@@ -122,6 +126,12 @@ class AmpScaler:
     def is_enabled(self) -> bool:
         """Return True if AMP is active."""
         return self._enabled
+
+    @property
+    def scaler(self) -> Optional[Any]:
+        """Return underlying GradScaler or None when disabled."""
+
+        return self._scaler
 
 
 __all__ = ["AmpScaler"]
