@@ -7,7 +7,12 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import (
+    DataLoader,
+    IterableDataset,
+    RandomSampler,
+    SequentialSampler,
+)
 
 from mfcl.metrics.knn import knn_predict
 
@@ -65,6 +70,8 @@ class LinearProbe:
         self.momentum = float(momentum)
         self.weight_decay = float(weight_decay)
         self.milestones = milestones
+        if batch_size_override is not None and int(batch_size_override) <= 0:
+            raise ValueError("batch_size_override must be a positive integer")
         self.batch_size_override = batch_size_override
         self.head = nn.Linear(self.feature_dim, self.num_classes).to(self.device)
 
@@ -74,6 +81,9 @@ class LinearProbe:
         Returns:
             {'top1': float, 'top5': float, 'loss': float}
         """
+        train_loader = self._prepare_loader(train_loader, shuffle_default=True)
+        val_loader = self._prepare_loader(val_loader, shuffle_default=False)
+
         opt = torch.optim.SGD(
             self.head.parameters(),
             lr=self.lr,
@@ -122,6 +132,62 @@ class LinearProbe:
         top5 = top5_sum / max(1, count)
         avg_loss = loss_meter / max(1, n_batches)
         return {"top1": float(top1), "top5": float(top5), "loss": float(avg_loss)}
+
+    def _prepare_loader(self, loader: DataLoader, *, shuffle_default: bool) -> DataLoader:
+        """Best-effort DataLoader clone honoring ``batch_size_override``."""
+        if self.batch_size_override is None:
+            return loader
+        if not isinstance(loader, DataLoader):
+            raise TypeError(
+                "batch_size_override requires torch.utils.data.DataLoader instances"
+            )
+        override = int(self.batch_size_override)
+        if loader.batch_size == override:
+            return loader
+        if isinstance(loader.dataset, IterableDataset):
+            raise ValueError(
+                "batch_size_override is not supported for IterableDataset loaders"
+            )
+
+        sampler = getattr(loader, "sampler", None)
+        sampler_arg = None
+        shuffle_flag = bool(shuffle_default)
+        if sampler is not None:
+            if isinstance(sampler, (RandomSampler, SequentialSampler)):
+                shuffle_flag = isinstance(sampler, RandomSampler)
+            else:
+                sampler_arg = sampler
+                shuffle_flag = False
+
+        kwargs: Dict[str, object] = {
+            "dataset": loader.dataset,
+            "batch_size": override,
+            "num_workers": loader.num_workers,
+            "pin_memory": loader.pin_memory,
+            "drop_last": loader.drop_last,
+            "collate_fn": loader.collate_fn,
+            "persistent_workers": getattr(loader, "persistent_workers", False)
+            if loader.num_workers > 0
+            else False,
+            "timeout": loader.timeout,
+        }
+        if loader.worker_init_fn is not None:
+            kwargs["worker_init_fn"] = loader.worker_init_fn
+        if loader.generator is not None:
+            kwargs["generator"] = loader.generator
+        prefetch = getattr(loader, "prefetch_factor", None)
+        if prefetch is not None:
+            kwargs["prefetch_factor"] = prefetch
+        pin_memory_device = getattr(loader, "pin_memory_device", None)
+        if pin_memory_device:
+            kwargs["pin_memory_device"] = pin_memory_device
+
+        if sampler_arg is not None:
+            kwargs["sampler"] = sampler_arg
+        else:
+            kwargs["shuffle"] = shuffle_flag
+
+        return DataLoader(**kwargs)
 
 
 class KNNEval:

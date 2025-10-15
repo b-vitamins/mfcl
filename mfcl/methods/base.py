@@ -71,6 +71,12 @@ class BaseMethod(nn.Module):
                 except Exception:
                     p = None
                 cur_dev = getattr(p, "device", None) if p is not None else None
+                if cur_dev is None:
+                    try:
+                        b = next(self.buffers(), None)
+                    except Exception:
+                        b = None
+                    cur_dev = getattr(b, "device", None) if b is not None else None
                 if cur_dev is None or cur_dev != dev:
                     self.to(dev)
         except Exception:
