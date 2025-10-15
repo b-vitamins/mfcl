@@ -143,7 +143,7 @@ def reduce_dict(
         else:  # pragma: no cover - defensive for mocked collectives
             dist.all_reduce(t)
         if op_normalized == "mean":
-            t /= world
+            t = t / world
         reduced[k] = t
     return reduced
 
