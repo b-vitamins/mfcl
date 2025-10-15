@@ -2,6 +2,8 @@
 
 Optional encoder that unifies timm models with the same feature contract as the
 torchvision resnet wrapper. Import is guarded and will raise if timm is missing.
+If ``global_pool == ""`` the encoder returns a feature map whose shape depends
+on the backbone.
 """
 
 from __future__ import annotations
@@ -28,17 +30,24 @@ class TimmEncoder(nn.Module):
         """Construct a timm encoder.
 
         Args:
-            model_name: timm model name (e.g., 'resnet18', 'convnext_tiny').
-            pretrained: Load pretrained weights if available.
-            train_bn: If False, sets all norm layers to eval and frozen.
-            norm_feat: If True, L2-normalize final features.
-            global_pool: Passed to timm.create_model(global_pool=...).
-            drop_path_rate: Passed to timm.create_model(drop_path_rate=...).
-            freeze_backbone: If True, disables grads for all backbone params.
+            model_name: timm model name (e.g., ``"resnet18"`` or
+                ``"convnext_tiny"``).
+            pretrained: Whether to load pretrained weights if available.
+            train_bn: If ``False``, BatchNorm/SyncBatchNorm/LayerNorm/GroupNorm
+                layers are frozen.
+            norm_feat: If ``True``, L2-normalize the pooled feature vectors.
+            global_pool: Forwarded to ``timm.create_model(global_pool=...)``.
+            drop_path_rate: Forwarded to ``timm.create_model``.
+            freeze_backbone: If ``True``, disables gradients for all backbone
+                parameters.
 
         Raises:
             ImportError: If timm is not installed.
-            ValueError: If model_name invalid or output dim cannot be inferred.
+            ValueError: If ``model_name`` is invalid or the feature dimension
+                cannot be inferred.
+
+        Returns:
+            None
         """
         super().__init__()
         self.norm_feat = bool(norm_feat)
@@ -64,7 +73,15 @@ class TimmEncoder(nn.Module):
             was_training = self.model.training
             self.model.eval()
             with torch.no_grad():
-                dummy = torch.zeros(1, 3, 160, 160)
+                param = next(self.model.parameters())
+                dummy = torch.zeros(
+                    1,
+                    3,
+                    160,
+                    160,
+                    device=param.device,
+                    dtype=param.dtype,
+                )
                 out = self.model(dummy)
             self.model.train(was_training)
             if not isinstance(out, torch.Tensor) or out.ndim < 2:
@@ -75,7 +92,14 @@ class TimmEncoder(nn.Module):
         if not train_bn:
             for m in self.model.modules():
                 if isinstance(
-                    m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.SyncBatchNorm, nn.LayerNorm)
+                    m,
+                    (
+                        nn.BatchNorm1d,
+                        nn.BatchNorm2d,
+                        nn.SyncBatchNorm,
+                        nn.LayerNorm,
+                        nn.GroupNorm,
+                    ),
                 ):
                     m.eval()
                     for p in m.parameters(recurse=False):
@@ -87,11 +111,25 @@ class TimmEncoder(nn.Module):
 
     @property
     def feature_dim(self) -> int:
-        """Return the feature dimension after pooling."""
+        """Feature dimension after pooling.
+
+        Returns:
+            int: Output feature dimensionality.
+        """
         return int(self._feat_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return [B, D] if global_pool!='', else feature map per timm behavior."""
+        """Compute encoder features.
+
+        Args:
+            x: Input tensor of shape ``[B, C, H, W]`` with ``C`` matching the
+                model's expected number of channels.
+
+        Returns:
+            torch.Tensor: ``[B, D]`` if ``global_pool`` is non-empty. If
+                ``global_pool == ""`` the return value follows timm's native
+                output (e.g., a feature map).
+        """
         out = self.model(x)
         # If pooled, timm returns [B, D]
         if out.ndim == 2 and self.norm_feat:

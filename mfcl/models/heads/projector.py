@@ -1,4 +1,4 @@
-"""Configurable MLP projector head.
+"""Configurable MLP projector head used in self-supervised learning.
 
 Used by SimCLR, MoCo v2, BYOL, SimSiam, SwAV, Barlow Twins, and VICReg.
 """
@@ -43,15 +43,19 @@ class Projector(nn.Module):
             hidden_dim: Hidden width for intermediate layers.
             out_dim: Output embedding dimension.
             num_layers: Total linear layers (>= 2 recommended).
-            use_bn: Apply BatchNorm1d after each hidden linear.
-            bn_last: If True, apply BN on the final layer output (before norm_out).
+            use_bn: Apply ``BatchNorm1d`` after each hidden linear layer.
+            bn_last: If ``True``, apply batch normalization on the final layer
+                output (before ``norm_out``).
             activation: Nonlinearity for hidden layers.
-            norm_out: If True, L2-normalize output along dim=1.
-            dropout: Dropout p in hidden layers (0 disables).
-            bias: Linear layer bias flags.
+            norm_out: If ``True``, L2-normalize the output along ``dim=1``.
+            dropout: Dropout probability in hidden layers; ``0`` disables.
+            bias: Whether linear layers include biases.
 
         Raises:
-            ValueError: If num_layers < 1 or dims invalid.
+            ValueError: If ``num_layers < 1`` or any dimension is non-positive.
+
+        Returns:
+            None
         """
         super().__init__()
         if num_layers < 1:
@@ -59,8 +63,16 @@ class Projector(nn.Module):
         if in_dim <= 0 or hidden_dim <= 0 or out_dim <= 0:
             raise ValueError("in_dim, hidden_dim and out_dim must be > 0")
 
+        self.in_dim = int(in_dim)
+        self.hidden_dim = int(hidden_dim)
         self.out_dim = int(out_dim)
+        self.num_layers = int(num_layers)
+        self.use_bn = bool(use_bn)
+        self.bn_last = bool(bn_last)
+        self.activation = activation
         self.norm_out = bool(norm_out)
+        self.dropout = float(dropout)
+        self.bias = bool(bias)
 
         layers: list[nn.Module] = []
         if num_layers == 1:
@@ -86,7 +98,8 @@ class Projector(nn.Module):
         self._init_weights(activation)
 
     def _init_weights(self, activation: Literal["relu", "gelu"]) -> None:
-        # Hidden linears: Kaiming normal; final linear: Xavier normal
+        # Hidden linears: Kaiming normal (fan_in, ReLU heuristic even for GELU);
+        # final linear: Xavier normal.
         last_linear: nn.Linear | None = None
         for m in self.net.modules():
             if isinstance(m, nn.Linear):
@@ -96,9 +109,10 @@ class Projector(nn.Module):
                 if m is last_linear:
                     nn.init.xavier_normal_(m.weight)
                 else:
-                    # PyTorch kaiming_normal_ supports 'relu' and 'leaky_relu'. Use relu as proxy for gelu.
+                    # PyTorch kaiming_normal_ supports 'relu' and 'leaky_relu'.
+                    # Use the ReLU heuristic as a close proxy for GELU.
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="relu"
+                        m.weight, mode="fan_in", nonlinearity="relu"
                     )
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
@@ -111,22 +125,39 @@ class Projector(nn.Module):
 
     @property
     def output_dim(self) -> int:
-        """Return out_dim."""
+        """Output embedding dimension.
+
+        Returns:
+            int: Dimensionality of the projector outputs.
+        """
         return self.out_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Project features into embedding space.
 
         Args:
-            x: [B, in_dim] features.
+            x: Input tensor of shape ``[B, in_dim]``.
 
         Returns:
-            [B, out_dim] projections (optionally L2-normalized).
+            torch.Tensor: Output tensor of shape ``[B, out_dim]`` (optionally
+                L2-normalized along ``dim=1``).
         """
         out = self.net(x)
         if self.norm_out:
             out = F.normalize(out, dim=1)
         return out
+
+    def __repr__(self) -> str:
+        """Return a readable summary of the projector configuration.
+
+        Returns:
+            str: Human-readable description of the projector.
+        """
+        return (
+            f"Projector(in={self.in_dim}, hid={self.hidden_dim}, out={self.out_dim}, "
+            f"layers={self.num_layers}, bn={self.use_bn}, bn_last={self.bn_last}, "
+            f"norm_out={self.norm_out}, activation='{self.activation}')"
+        )
 
 
 __all__ = ["Projector"]
