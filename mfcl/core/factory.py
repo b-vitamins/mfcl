@@ -9,6 +9,7 @@ registered via explicit calls and constructed deterministically.
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+import warnings
 
 import torch
 from torch import nn
@@ -46,8 +47,14 @@ try:
     ENCODER_REGISTRY.add("resnet18", make_resnet18)
     ENCODER_REGISTRY.add("resnet34", make_resnet34)
     ENCODER_REGISTRY.add("resnet50", make_resnet50)
-except Exception:
-    pass
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional ResNet encoder dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering ResNet encoders") from err
 
 ENCODER_REGISTRY.add("timm", TimmEncoder)
 
@@ -57,8 +64,14 @@ try:
 
     HEAD_REGISTRY.add("projector", Projector)
     HEAD_REGISTRY.add("predictor", Predictor)
-except Exception:
-    pass
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional head dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering heads") from err
 
 try:
     from mfcl.losses.ntxent import NTXentLoss
@@ -76,8 +89,14 @@ try:
     LOSS_REGISTRY.add("swavloss", SwAVLoss)
     LOSS_REGISTRY.add("barlowtwins", BarlowTwinsLoss)
     LOSS_REGISTRY.add("vicregloss", VICRegLoss)
-except Exception:
-    pass
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional loss dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering losses") from err
 
 try:
     from mfcl.transforms.simclr import build_pair_transforms
@@ -85,8 +104,14 @@ try:
 
     TRANSFORM_REGISTRY.add("simclr", build_pair_transforms)
     TRANSFORM_REGISTRY.add("multicrop", build_multicrop_transforms)
-except Exception:
-    pass
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional transform dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering transforms") from err
 
 try:
     from mfcl.methods.simclr import SimCLR
@@ -104,8 +129,14 @@ try:
     METHOD_REGISTRY.add("barlow", BarlowTwins)
     METHOD_REGISTRY.add("vicreg", VICReg)
     METHOD_REGISTRY.add("swav", SwAV)
-except Exception:
-    pass
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional method dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering methods") from err
 
 
 def _check_encoder_output_dim(
