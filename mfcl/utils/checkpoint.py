@@ -75,7 +75,8 @@ def _prune_old_checkpoints(path: str, keep_k: int) -> None:
         )
     except OSError:
         # If mtimes cannot be read (e.g., removed concurrently), fall back to lexic order
-        all_matches.sort()
+        # but keep newest-first semantics to avoid pruning recent checkpoints.
+        all_matches.sort(reverse=True)
     to_remove = all_matches[keep_k:]
     for p in to_remove:
         try:
@@ -182,7 +183,7 @@ def latest_checkpoint(dir_path: str, pattern: str = "ckpt_ep*.pt") -> Optional[s
             reverse=True,
         )
     except OSError:
-        matches.sort()
+        matches.sort(reverse=True)
     return matches[0]
 
 
