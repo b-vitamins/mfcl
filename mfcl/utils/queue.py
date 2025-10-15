@@ -35,17 +35,17 @@ class RingQueue:
         """Append rows of x (N,D), overwriting oldest entries cyclically."""
         if x.ndim != 2 or x.shape[1] != self.dim:
             raise ValueError(f"Expected x shape [N,{self.dim}], got {tuple(x.shape)}")
-        x = x.to(self.buf.dtype)
+        x = x.to(device=self.buf.device, dtype=self.buf.dtype, copy=False)
         n = x.shape[0]
         if n == 0:
             return
         end = self.ptr + n
         if end <= self.size:
-            self.buf[self.ptr : end].copy_(x.to(self.buf.device))
+            self.buf[self.ptr : end].copy_(x)
         else:
             first = self.size - self.ptr
-            self.buf[self.ptr :].copy_(x[:first].to(self.buf.device))
-            self.buf[: end % self.size].copy_(x[first:].to(self.buf.device))
+            self.buf[self.ptr :].copy_(x[:first])
+            self.buf[: end % self.size].copy_(x[first:])
         self.ptr = (self.ptr + n) % self.size
         if n >= self.size or self.ptr == 0:
             self.full = True

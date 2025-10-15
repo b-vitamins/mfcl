@@ -7,7 +7,7 @@ scaling across CUDA-enabled and CPU-only environments.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -91,6 +91,32 @@ class AmpScaler:
         """
         if self._enabled and self._scaler is not None:
             self._scaler.unscale_(optimizer)
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return the underlying scaler state for checkpointing.
+
+        Returns an empty mapping when AMP is disabled so that callers can
+        unconditionally serialize the result without having to branch on the
+        scaler configuration.
+        """
+
+        if self._enabled and self._scaler is not None:
+            return self._scaler.state_dict()
+        return {}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore scaler state, tolerating disabled AMP configurations.
+
+        When AMP is disabled ``state`` is ignored (this allows resuming a GPU
+        run on CPU without errors).  If AMP is enabled but the incoming state is
+        empty, the scaler is left at its default initialization.
+        """
+
+        if not state:
+            return
+        if not self._enabled or self._scaler is None:
+            return
+        self._scaler.load_state_dict(state)
 
     @property
     def is_enabled(self) -> bool:

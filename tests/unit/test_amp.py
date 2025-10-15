@@ -21,3 +21,33 @@ def test_amp_scaler_step_update(tmp_path):
     scaler.unscale_(opt)
     scaler.step(opt)
     scaler.update()
+
+
+def test_amp_scaler_state_roundtrip_handles_disabled():
+    scaler = AmpScaler(enabled=False)
+    assert scaler.state_dict() == {}
+    # Loading any state should be a no-op when AMP is disabled
+    scaler.load_state_dict({})
+    scaler.load_state_dict({"foo": 1})
+
+
+def test_amp_scaler_state_roundtrip_enabled():
+    scaler = AmpScaler(enabled=False)
+    scaler._enabled = True
+
+    class _FakeScaler:
+        def __init__(self) -> None:
+            self.loaded = None
+
+        def state_dict(self):
+            return {"foo": "bar"}
+
+        def load_state_dict(self, state):
+            self.loaded = state
+
+    fake = _FakeScaler()
+    scaler._scaler = fake
+
+    assert scaler.state_dict() == {"foo": "bar"}
+    scaler.load_state_dict({"foo": "baz"})
+    assert fake.loaded == {"foo": "baz"}
