@@ -18,12 +18,18 @@ def _offdiag(M: torch.Tensor) -> torch.Tensor:
 class BarlowTwinsLoss(nn.Module):
     """Cross-correlation identity loss."""
 
-    def __init__(self, lambda_offdiag: float = 5e-3, eps: float = 1e-4) -> None:
+    def __init__(
+        self,
+        lambda_offdiag: float = 5e-3,
+        eps: float = 1e-4,
+        normalize_by_dim: bool = False,
+    ) -> None:
         """Initialize Barlow Twins loss.
 
         Args:
             lambda_offdiag: Weight for off-diagonal terms.
             eps: Small constant for std normalization.
+            normalize_by_dim: If True, average diag/off terms for dimension invariance.
 
         Raises:
             ValueError: If lambda_offdiag <= 0 or eps <= 0.
@@ -33,6 +39,7 @@ class BarlowTwinsLoss(nn.Module):
             raise ValueError("lambda_offdiag and eps must be > 0")
         self.lmb = float(lambda_offdiag)
         self.eps = float(eps)
+        self.norm_by_dim = bool(normalize_by_dim)
 
     def forward(
         self, z1: torch.Tensor, z2: torch.Tensor
@@ -61,13 +68,19 @@ class BarlowTwinsLoss(nn.Module):
         # Center and normalize per-dimension
         x = x - x.mean(dim=0)
         y = y - y.mean(dim=0)
-        x = x / (x.std(dim=0) + self.eps)
-        y = y / (y.std(dim=0) + self.eps)
+        x = x / (x.std(dim=0, unbiased=False) + self.eps)
+        y = y / (y.std(dim=0, unbiased=False) + self.eps)
 
         C = (x.t() @ y) / B  # [D,D]
         diag = torch.diag(C)
         off = _offdiag(C)
-        loss = ((1.0 - diag) ** 2).sum() + self.lmb * (off**2).sum()
+        if self.norm_by_dim:
+            diag_term = ((1.0 - diag) ** 2).mean()
+            off_term = (off**2).mean()
+        else:
+            diag_term = ((1.0 - diag) ** 2).sum()
+            off_term = (off**2).sum()
+        loss = diag_term + self.lmb * off_term
 
         stats = {
             "diag_mean": diag.mean().detach(),
