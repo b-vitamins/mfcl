@@ -114,3 +114,24 @@ logs/
 *.pt
 *.pth
 *.ckpt
+
+# Examples subtree artifacts
+/examples/**/data/
+/examples/**/datasets/
+/examples/**/outputs/
+/examples/**/output/
+/examples/**/runs/
+/examples/**/checkpoints/
+/examples/**/ckpts/
+/examples/**/weights/
+/examples/**/artifacts/
+/examples/**/wandb/
+/examples/**/mlruns/
+/examples/**/lightning_logs/
+/examples/**/tensorboard/
+/examples/**/tb_logs/
+/examples/**/.cache/
+/examples/**/cache/
+/examples/**/tmp/
+/examples/**/temp/
+/examples/**/tmp*/
