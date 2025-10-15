@@ -21,4 +21,5 @@ python visual.py --runs runs/moco_resnet18_160/2025...
 **Notes**
 
 * Momentum encoder with queue; InfoNCE temperature ~0.2.
+* Logged metrics include `loss`, `pos_sim`, `neg_sim_mean`, `queue_len`, and `queue_capacity`.
 

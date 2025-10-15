@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
+import torch
 import torch.nn as nn
 
 from mfcl.methods.base import BaseMethod
@@ -26,14 +27,14 @@ class BarlowTwins(BaseMethod):
         self.projector = projector
         self.loss_fn = BarlowTwinsLoss(lambda_offdiag=lambda_offdiag, eps=eps)
 
-    def forward_views(self, batch: Dict[str, Any]):
+    def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         z1 = self.projector(self.encoder(batch["view1"]))
         z2 = self.projector(self.encoder(batch["view2"]))
         return z1, z2
 
-    def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
+    def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         z1, z2 = proj
-        loss, stats = self.loss_fn(z1, z2)  # type: ignore[arg-type]
+        loss, stats = self.loss_fn(z1, z2)
         stats["loss"] = loss
         return stats
 

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
-from mfcl.losses.mococontrast import MoCoContrastLoss
 from mfcl.utils.ema import MomentumUpdater
 from mfcl.utils.queue import RingQueue
 
@@ -46,38 +46,41 @@ class MoCo(BaseMethod):
         self.projector_q = projector_q
         self.projector_k = projector_k
         self.updater = MomentumUpdater(self.encoder_q, self.encoder_k, momentum)
-        # Store queue on CPU by default; loss will move negatives to device as needed.
         self.queue = RingQueue(
             dim=projector_q.output_dim, size=queue_size, device="cpu"
         )
-        self.loss_fn = MoCoContrastLoss(temperature=temperature, normalize=normalize)
+        self.temperature = float(temperature)
+        self.do_normalize = bool(normalize)
 
     def on_train_start(self) -> None:
         self.updater.copy_params()
-        # Seed the negative queue to avoid empty-queue edge cases on first step
-        try:
-            with torch.no_grad():
-                seed = torch.randn(
-                    self.queue.size, self.projector_q.output_dim, device=self.queue.buf.device
-                )
-                self.queue.enqueue(seed)
-        except Exception:
-            pass
 
-    def forward_views(self, batch: Dict[str, Any]):
+    def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         q = self.projector_q(self.encoder_q(batch["view1"]))
         with torch.no_grad():
             self.updater.update()
             k = self.projector_k(self.encoder_k(batch["view2"]))
         return q, k
 
-    def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
-        q, k = proj  # type: ignore[assignment]
-        loss, stats = self.loss_fn(q, k, self.queue)  # type: ignore[arg-type]
-        # Enqueue detached keys (again, acts as FIFO ring buffer)
-        self.queue.enqueue(k.detach())
+    def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        q, k = proj
+        seeded_queue = False
+        if len(self.queue) == 0:
+            self.queue.enqueue(k.detach())
+            seeded_queue = True
+
+        negatives = self.queue.get()
+
+        loss, stats = self._info_nce_with(q, k, negatives)
+
+        if not seeded_queue:
+            self.queue.enqueue(k.detach())
+
         stats["loss"] = loss
-        stats["queue_size"] = torch.tensor(
+        stats["queue_len"] = torch.tensor(
+            len(self.queue), device=q.device, dtype=torch.float32
+        )
+        stats["queue_capacity"] = torch.tensor(
             self.queue.size, device=q.device, dtype=torch.float32
         )
         return stats
@@ -85,6 +88,50 @@ class MoCo(BaseMethod):
     def on_optimizer_step(self) -> None:
         # No action; EMA occurs pre-forward; queue updated during compute_loss.
         return
+
+    def _info_nce_with(
+        self, q: torch.Tensor, k: torch.Tensor, negatives: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Compute InfoNCE with explicitly provided negatives.
+
+        The helper defensively moves all operands to the query device so future
+        refactors cannot accidentally introduce cross-device matmuls.
+        """
+        if q.shape != k.shape or q.ndim != 2:
+            raise ValueError("q and k must be 2D tensors with identical shapes")
+
+        qf = q.to(torch.float32)
+        kf = k.detach().to(torch.float32)
+        if self.do_normalize:
+            qf = F.normalize(qf, dim=1)
+            kf = F.normalize(kf, dim=1)
+
+        if negatives.numel() > 0:
+            negf = negatives.detach().to(
+                device=q.device, dtype=torch.float32, non_blocking=True
+            )
+            if self.do_normalize:
+                negf = F.normalize(negf, dim=1)
+        else:
+            negf = qf.new_empty((0, qf.size(1)))
+
+        pos = torch.sum(qf * kf, dim=1, keepdim=True)
+        if negf.numel() > 0:
+            neg_logits = qf @ negf.t()
+            neg_sim_mean = neg_logits.mean().detach()
+        else:
+            neg_logits = qf.new_empty((qf.size(0), 0))
+            neg_sim_mean = qf.new_zeros(())
+
+        logits = torch.cat([pos, neg_logits], dim=1) / self.temperature
+        labels = torch.zeros(qf.size(0), dtype=torch.long, device=q.device)
+        loss = F.cross_entropy(logits, labels)
+
+        stats: Dict[str, torch.Tensor] = {
+            "pos_sim": pos.mean().detach(),
+            "neg_sim_mean": neg_sim_mean,
+        }
+        return loss, stats
 
 
 __all__ = ["MoCo"]

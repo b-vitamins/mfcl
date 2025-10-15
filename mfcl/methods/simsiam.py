@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
+import torch
 import torch.nn as nn
 
 from mfcl.methods.base import BaseMethod
@@ -28,16 +29,20 @@ class SimSiam(BaseMethod):
         self.predictor = predictor
         self.loss_fn = SimSiamLoss(normalize=normalize)
 
-    def forward_views(self, batch: Dict[str, Any]):
+    def forward_views(
+        self, batch: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         z1 = self.projector(self.encoder(batch["view1"]))
         z2 = self.projector(self.encoder(batch["view2"]))
         p1 = self.predictor(z1)
         p2 = self.predictor(z2)
         return p1, z2, p2, z1
 
-    def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
+    def compute_loss(
+        self, *proj: Any, batch: Dict[str, Any]
+    ) -> Dict[str, torch.Tensor]:
         p1, z2, p2, z1 = proj
-        loss, stats = self.loss_fn(p1, z2, p2, z1)  # type: ignore[arg-type]
+        loss, stats = self.loss_fn(p1, z2, p2, z1)
         stats["loss"] = loss
         return stats
 
