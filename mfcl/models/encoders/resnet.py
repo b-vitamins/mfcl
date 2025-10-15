@@ -6,6 +6,7 @@ vector per image (or the last feature map, if requested).
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal
 
 import torch
@@ -74,38 +75,92 @@ class ResNetEncoder(nn.Module):
         pool: Literal["avg", "identity"] = "avg",
         drop_path_rate: float = 0.0,
         freeze_backbone: bool = False,
+        in_channels: int = 3,
     ) -> None:
         """Construct a ResNet encoder.
 
         Args:
-            variant: ResNet variant.
-            pretrained: Load torchvision pretrained weights.
-            train_bn: If False, batch norm layers are eval-mode and frozen.
-            norm_feat: If True, L2-normalize output features along dim=1.
-            pool: 'avg' uses AdaptiveAvgPool2d(1); 'identity' returns feature map.
-            drop_path_rate: Not used by torchvision resnets; kept for parity with timm.
-            freeze_backbone: If True, sets requires_grad=False for all backbone params.
+            variant: ResNet variant to instantiate.
+            pretrained: Whether to load torchvision pretrained weights.
+            train_bn: If ``False``, BatchNorm/SyncBatchNorm/GroupNorm layers are
+                set to eval mode and their parameters are frozen.
+            norm_feat: If ``True``, L2-normalize pooled output features.
+            pool: ``"avg"`` applies global average pooling; ``"identity"``
+                returns the spatial feature map.
+            drop_path_rate: Drop path regularization rate. Torchvision ResNets do
+                not support stochastic depth; if non-zero a warning is emitted
+                and the value is ignored.
+            freeze_backbone: If ``True``, all backbone parameters are frozen.
+            in_channels: Number of input channels expected by ``forward``. When
+                loading pretrained weights and the value differs from ``3``, the
+                first convolution kernel is adapted using channel-mean
+                initialization (for ``<=3`` channels) or repetition (for more
+                channels).
 
         Raises:
-            ValueError: If variant not supported or pool not recognized.
+            ValueError: If ``variant`` is unsupported or ``pool`` is invalid.
+
+        Returns:
+            None
         """
         super().__init__()
         if pool not in {"avg", "identity"}:
             raise ValueError("pool must be 'avg' or 'identity'")
+        if drop_path_rate:
+            warnings.warn(
+                "drop_path_rate is ignored for torchvision ResNets.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.variant = variant
         self.norm_feat = bool(norm_feat)
         self.pool_mode = pool
+        self.in_channels = int(in_channels)
+        if self.in_channels < 1:
+            raise ValueError("in_channels must be >= 1")
         self._feat_dim = _VARIANT_TO_DIM.get(variant, 0)
 
         backbone = _create_tv_resnet(variant, pretrained=pretrained)
         # Remove classifier head to expose features
         backbone.fc = nn.Identity()
+        if self.in_channels != getattr(backbone.conv1, "in_channels", self.in_channels):
+            old_conv: nn.Conv2d = backbone.conv1  # type: ignore[assignment]
+            new_conv = nn.Conv2d(
+                self.in_channels,
+                old_conv.out_channels,
+                kernel_size=old_conv.kernel_size,
+                stride=old_conv.stride,
+                padding=old_conv.padding,
+                bias=False,
+            )
+            if pretrained:
+                with torch.no_grad():
+                    weight = old_conv.weight.data
+                    if self.in_channels == 1:
+                        adapted = weight.mean(dim=1, keepdim=True)
+                    elif self.in_channels > weight.shape[1]:
+                        repeat = -(-self.in_channels // weight.shape[1])
+                        adapted = weight.repeat(1, repeat, 1, 1)[
+                            :, : self.in_channels, :, :
+                        ]
+                    else:
+                        base = weight.mean(dim=1, keepdim=True)
+                        adapted = base.repeat(1, self.in_channels, 1, 1)
+                    new_conv.weight.data.copy_(adapted)
+            backbone.conv1 = new_conv
         self.backbone = backbone
         self.pool = nn.AdaptiveAvgPool2d(1) if pool == "avg" else nn.Identity()
 
         if not train_bn:
             for m in self.backbone.modules():
-                if isinstance(m, nn.modules.batchnorm._BatchNorm):
+                if isinstance(
+                    m,
+                    (
+                        nn.modules.batchnorm._BatchNorm,
+                        nn.SyncBatchNorm,
+                        nn.GroupNorm,
+                    ),
+                ):
                     m.eval()
                     for p in m.parameters():
                         p.requires_grad = False
@@ -116,12 +171,25 @@ class ResNetEncoder(nn.Module):
 
     @property
     def feature_dim(self) -> int:
-        """Return the feature dimension after pooling."""
+        """Feature dimension after pooling.
+
+        Returns:
+            int: Output feature dimensionality.
+        """
         return int(self._feat_dim)
 
     def _forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        # Re-implement torchvision ResNet feature extraction explicitly.
-        # Use dynamic attribute access to avoid strict typing issues with stubs.
+        """Forward input through the ResNet feature extractor.
+
+        The implementation assumes the wrapped module exposes torchvision-style
+        attributes (``conv1``, ``bn1``, ``layer1`` ... ``layer4``).
+
+        Args:
+            x: Input tensor of shape ``[B, C, H, W]``.
+
+        Returns:
+            torch.Tensor: The final convolutional feature map prior to pooling.
+        """
         m: object = self.backbone
         x = getattr(m, "conv1")(x)  # type: ignore[no-any-call]
         x = getattr(m, "bn1")(x)  # type: ignore[no-any-call]
@@ -134,17 +202,20 @@ class ResNetEncoder(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute features.
+        """Compute encoder features.
 
         Args:
-            x: Float tensor [B, 3, H, W], normalized by caller.
+            x: Input tensor with shape ``[B, C, H, W]`` where ``C`` matches the
+                ``in_channels`` argument provided at construction.
 
         Returns:
-            If pool=='avg': [B, D] where D = feature_dim.
-            If pool=='identity': [B, D, H', W'] feature map from penultimate layer.
+            torch.Tensor: If ``pool == 'avg'`` returns ``[B, D]`` where
+                ``D == feature_dim``. If ``pool == 'identity'`` returns the
+                penultimate feature map ``[B, D, H', W']``.
 
         Notes:
-            - If norm_feat is True and pool=='avg', returns L2-normalized [B, D].
+            If ``norm_feat`` is ``True`` and ``pool == 'avg'``, the output is
+            L2-normalized across the feature dimension.
         """
         feats = self._forward_features(x)
         if isinstance(self.pool, nn.Identity):
@@ -153,6 +224,27 @@ class ResNetEncoder(nn.Module):
         if self.norm_feat:
             pooled = F.normalize(pooled, dim=1)
         return pooled
+
+    def set_train_bn(self, train: bool) -> None:
+        """Toggle training mode and gradients for normalization layers.
+
+        Args:
+            train: ``True`` enables BatchNorm statistics updates and gradients;
+                ``False`` freezes them. GroupNorm layers only have their
+                gradients toggled as they are stateless with respect to
+                train/eval mode.
+
+        Returns:
+            None
+        """
+        for m in self.backbone.modules():
+            if isinstance(m, (nn.modules.batchnorm._BatchNorm, nn.SyncBatchNorm)):
+                m.train(train)
+                for p in m.parameters(recurse=False):
+                    p.requires_grad = train
+            elif isinstance(m, nn.GroupNorm):
+                for p in m.parameters(recurse=False):
+                    p.requires_grad = train
 
 
 def make_resnet18(**kwargs) -> ResNetEncoder:
