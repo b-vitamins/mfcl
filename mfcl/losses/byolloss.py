@@ -46,7 +46,19 @@ class BYOLLoss(nn.Module):
         Returns:
             loss: Scalar mean over batch.
             stats: {'cos_sim': mean cosine(p, sg(z))}
+
+        Raises:
+            ValueError: If any tensor is not 2D [B, D].
+            ValueError: If tensor shapes differ.
+            ValueError: If batch size < 1.
         """
+        if not (p1.ndim == p2.ndim == z1.ndim == z2.ndim == 2):
+            raise ValueError("all BYOL tensors must be 2D [B, D]")
+        if p1.shape != p2.shape or p1.shape != z1.shape or p1.shape != z2.shape:
+            raise ValueError("all BYOL tensors must share the same shape [B, D]")
+        if p1.size(0) < 1:
+            raise ValueError("batch size must be >= 1 for BYOL")
+
         # Stop gradient on targets
         z1 = z1.detach()
         z2 = z2.detach()
@@ -62,21 +74,18 @@ class BYOLLoss(nn.Module):
             z1f = F.normalize(z1f, dim=1)
             z2f = F.normalize(z2f, dim=1)
 
+        cos1 = F.cosine_similarity(p1f, z2f, dim=1)
+        cos2 = F.cosine_similarity(p2f, z1f, dim=1)
+        cos_sim = 0.5 * (cos1.mean() + cos2.mean())
+
         if self.variant == "cosine":
-            cos1 = torch.sum(p1f * z2f, dim=1)
-            cos2 = torch.sum(p2f * z1f, dim=1)
             # 1 - cos per pair, averaged symmetrically
             loss = 0.5 * ((1.0 - cos1).mean() + (1.0 - cos2).mean())
-            cos_sim = 0.5 * (cos1.mean() + cos2.mean())
         else:  # mse variant
             loss = 0.5 * (
                 (p1f - z2f).pow(2).sum(dim=1).mean()
                 + (p2f - z1f).pow(2).sum(dim=1).mean()
             )
-            # Provide cosine similarity stat for monitoring
-            cos1 = F.cosine_similarity(p1f, z2f, dim=1)
-            cos2 = F.cosine_similarity(p2f, z1f, dim=1)
-            cos_sim = 0.5 * (cos1.mean() + cos2.mean())
 
         stats = {"cos_sim": cos_sim.detach()}
         return loss, stats

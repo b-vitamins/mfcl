@@ -14,7 +14,14 @@ import torch.nn.functional as F
 
 
 class NTXentLoss(nn.Module):
-    """Normalized temperature-scaled cross-entropy for two views."""
+    """Normalized temperature-scaled cross-entropy for two views.
+
+    Returns:
+        loss: Scalar tensor, mean over the batch. The loss uses mean reduction.
+
+    Notes:
+        Similarities are computed in float32 for stability.
+    """
 
     def __init__(self, temperature: float = 0.1, normalize: bool = True) -> None:
         """Initialize NT-Xent loss.
@@ -42,12 +49,15 @@ class NTXentLoss(nn.Module):
             z2: [B, D] projections for view 2.
 
         Returns:
-            loss: Scalar tensor, mean over the batch.
+            loss: Scalar tensor, mean over the batch. The loss uses mean reduction.
             stats: {'pos_sim': mean cosine of positives,
                     'neg_sim_mean': mean cosine over negatives}
 
         Raises:
             ValueError: If batch size < 2 or shapes mismatch.
+
+        Notes:
+            Similarities are computed in float32 for stability.
         """
         if z1.ndim != 2 or z2.ndim != 2 or z1.shape != z2.shape:
             raise ValueError("z1 and z2 must be 2D tensors with identical shapes")

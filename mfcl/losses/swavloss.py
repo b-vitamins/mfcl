@@ -104,8 +104,8 @@ class SwAVLoss(nn.Module):
         """Compute SwAV loss.
 
         Args:
-            logits_per_crop: List of length C where each element is [B, K] prototype logits
-                for a crop (already divided by prototype temperature upstream).
+            logits_per_crop: List of length C where each element is [B, K] raw prototype
+                logits for a crop (temperature is applied inside this loss).
             code_crop_indices: Indices of two "global" crops to compute assignments for,
                 e.g. (0, 1).
 
@@ -136,13 +136,17 @@ class SwAVLoss(nn.Module):
         q_max_mean = 0.5 * (Qa.max(dim=1).values.mean() + Qb.max(dim=1).values.mean())
 
         # Predict assignments from other crops
+        logp_per_crop = [
+            F.log_softmax(logits.to(torch.float32) / self.temp, dim=1)
+            for logits in logits_per_crop
+        ]
         losses = []
         for c, logits_c in enumerate(logits_per_crop):
             if c != a:
-                logp = F.log_softmax(logits_c.to(torch.float32) / self.temp, dim=1)
+                logp = logp_per_crop[c]
                 losses.append(-(Qa * logp).sum(dim=1).mean())
             if c != b:
-                logp = F.log_softmax(logits_c.to(torch.float32) / self.temp, dim=1)
+                logp = logp_per_crop[c]
                 losses.append(-(Qb * logp).sum(dim=1).mean())
         if not losses:
             raise ValueError("Not enough crops to compute SwAV loss")

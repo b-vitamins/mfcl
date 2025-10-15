@@ -65,6 +65,9 @@ class VICRegLoss(nn.Module):
 
         Raises:
             ValueError: If batch size < 2 or shapes mismatch.
+
+        Notes:
+            Standard deviations are computed with unbiased=False for stability.
         """
         if z1.ndim != 2 or z2.ndim != 2 or z1.shape != z2.shape:
             raise ValueError("z1 and z2 must be 2D tensors with identical shapes")
@@ -79,8 +82,8 @@ class VICRegLoss(nn.Module):
         mse = F.mse_loss(x, y)
 
         # Variance term: hinge on per-dimension std
-        sx = x.std(dim=0) + self.eps
-        sy = y.std(dim=0) + self.eps
+        sx = x.std(dim=0, unbiased=False) + self.eps
+        sy = y.std(dim=0, unbiased=False) + self.eps
         vx = torch.relu(self.gamma - sx).mean()
         vy = torch.relu(self.gamma - sy).mean()
         var = 0.5 * (vx + vy)

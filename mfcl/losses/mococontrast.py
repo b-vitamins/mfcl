@@ -44,7 +44,7 @@ class MoCoContrastLoss(nn.Module):
             stats: {'pos_sim': ..., 'neg_sim_mean': ...}
 
         Raises:
-            ValueError: If shapes mismatch or K == 0.
+            ValueError: If shapes mismatch, queue dimension mismatches, or K == 0.
         """
         if q.shape != k.shape or q.ndim != 2:
             raise ValueError("q and k must be 2D tensors with identical shapes")
@@ -58,8 +58,15 @@ class MoCoContrastLoss(nn.Module):
         negs = queue.get()
         has_negs = negs is not None and negs.numel() > 0
         if has_negs:
+            if negs.ndim != 2 or negs.shape[1] != qf.shape[1]:
+                raise ValueError("queue negatives shape must be [K, D] matching q's D")
             # Move negatives to query device for matmul compatibility and cast to fp32
-            negs = negs.clone().detach().to(device=q.device, dtype=torch.float32)
+            negs = negs.detach()
+            if negs.device != q.device or negs.dtype != torch.float32:
+                negs = negs.to(device=q.device, dtype=torch.float32, non_blocking=True)
+            else:
+                # Break alias with queue storage so subsequent updates don't mutate logits
+                negs = negs.clone()
         else:
             raise ValueError("queue returned empty negatives")
 
