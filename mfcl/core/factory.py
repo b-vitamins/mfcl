@@ -735,7 +735,11 @@ def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBa
     Returns:
         A PyTorch LR scheduler or ``None`` for a constant LR.
     """
-    warmup_epochs = int(max(0, cfg.train.warmup_epochs))
+    warmup_cfg = cfg.train.warmup_epochs
+    if warmup_cfg is None:
+        warmup_epochs = 0
+    else:
+        warmup_epochs = int(max(0, warmup_cfg))
     main_epochs = max(1, cfg.train.epochs - warmup_epochs)
 
     if cfg.train.cosine:
