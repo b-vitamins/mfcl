@@ -56,11 +56,13 @@ def _derive_prune_pattern(path: str) -> str:
     return f"{prefix}*{ext}"
 
 
-def _prune_old_checkpoints(path: str, keep_k: int) -> None:
+def _prune_old_checkpoints(
+    path: str, keep_k: int, prune_pattern: Optional[str] = None
+) -> None:
     if keep_k <= 0:
         return
     d = os.path.dirname(os.path.abspath(path)) or "."
-    pattern = _derive_prune_pattern(path)
+    pattern = prune_pattern or _derive_prune_pattern(path)
     all_matches = [
         p
         for p in glob.glob(os.path.join(d, pattern))
@@ -105,6 +107,7 @@ def save_checkpoint(
     state: StateDict,
     keep_k: int = 3,
     make_latest: bool = True,
+    prune_pattern: Optional[str] = None,
 ) -> str:
     """Atomically save a checkpoint and prune older ones.
 
@@ -114,6 +117,7 @@ def save_checkpoint(
         keep_k: Number of most recent checkpoints to retain in the directory.
             If <= 0, do not delete any.
         make_latest: If True, create/update symlink 'latest.pt' in the same dir.
+        prune_pattern: Optional glob pattern controlling retention pruning.
 
     Returns:
         The final saved path (identical to 'path').
@@ -126,7 +130,7 @@ def save_checkpoint(
     _ensure_dir(path)
     _atomic_save(path, state)
     try:
-        _prune_old_checkpoints(path, keep_k)
+        _prune_old_checkpoints(path, keep_k, prune_pattern)
     finally:
         # Ensure latest pointer is updated even if pruning raises; this matches
         # the expectation that the newest checkpoint is usable.
@@ -172,6 +176,9 @@ def latest_checkpoint(dir_path: str, pattern: str = "ckpt_ep*.pt") -> Optional[s
     Returns:
         Path to latest checkpoint or None if none found.
     """
+    latest = os.path.join(dir_path, "latest.pt")
+    if os.path.exists(latest):
+        return latest
     matches = [
         p for p in glob.glob(os.path.join(dir_path, pattern)) if os.path.isfile(p)
     ]
@@ -187,4 +194,28 @@ def latest_checkpoint(dir_path: str, pattern: str = "ckpt_ep*.pt") -> Optional[s
     return matches[0]
 
 
-__all__ = ["save_checkpoint", "load_checkpoint", "latest_checkpoint", "StateDict"]
+def cpu_state(state: StateDict) -> StateDict:
+    """Return a deep-copied state with all tensor leaves moved to CPU."""
+
+    def to_cpu(x: Any) -> Any:
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu()
+        if isinstance(x, dict):
+            return {k: to_cpu(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            converted = [to_cpu(v) for v in x]
+            if isinstance(x, tuple):
+                return tuple(converted)
+            return type(x)(converted)
+        return x
+
+    return to_cpu(state)
+
+
+__all__ = [
+    "save_checkpoint",
+    "load_checkpoint",
+    "latest_checkpoint",
+    "cpu_state",
+    "StateDict",
+]

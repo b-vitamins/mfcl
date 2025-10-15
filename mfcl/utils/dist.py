@@ -68,6 +68,15 @@ def get_rank() -> int:
     return 0
 
 
+def get_local_rank() -> int:
+    """Return LOCAL_RANK from env (0 if absent)."""
+
+    try:
+        return int(os.getenv("LOCAL_RANK", "0"))
+    except ValueError:
+        return 0
+
+
 def get_world_size() -> int:
     """Return world size (1 if not initialized)."""
     if is_dist():
@@ -128,34 +137,45 @@ def reduce_dict(
         if not torch.is_tensor(v):  # pragma: no cover - defensive
             raise TypeError(f"Value for key '{k}' must be a torch.Tensor")
         t = v.clone()
-        # Use best-effort all_reduce; avoid relying on ReduceOp to ease testing/mocking.
-        try:
-            dist.all_reduce(t)  # type: ignore[misc]
-        except TypeError:
-            # Some mocks may require explicit op argument; fall back to SUM semantics
-            try:
-                dist.all_reduce(t, op=getattr(dist, "ReduceOp", None).SUM)  # type: ignore[attr-defined]
-            except Exception:
-                # If still failing, leave tensor unchanged
-                pass
+        reduce_op = getattr(dist, "ReduceOp", None)
+        if reduce_op is not None and hasattr(reduce_op, "SUM"):
+            dist.all_reduce(t, op=reduce_op.SUM)
+        else:  # pragma: no cover - defensive for mocked collectives
+            dist.all_reduce(t)
         if op_normalized == "mean":
-            t = t / world
+            t /= world
         reduced[k] = t
     return reduced
 
 
-def all_gather_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def all_gather_tensor(tensor: torch.Tensor, debug_shapes: bool = False) -> torch.Tensor:
     """All-gather a tensor along the first dimension.
 
     Args:
         tensor: Local tensor to gather (same shape across ranks).
+        debug_shapes: When True, assert equal shapes across ranks before gather.
 
     Returns:
         Concatenated tensor across ranks (on current device).
     """
     if not is_dist():
         return tensor.clone()
+
     world = get_world_size()
+
+    if debug_shapes:
+        shape_tensor = torch.tensor(
+            list(tensor.shape), device=tensor.device, dtype=torch.long
+        )
+        gathered_shapes = [torch.zeros_like(shape_tensor) for _ in range(world)]
+        dist.all_gather(gathered_shapes, shape_tensor)
+        reference = gathered_shapes[0]
+        for idx, shape in enumerate(gathered_shapes[1:], start=1):
+            if not torch.equal(shape, reference):
+                raise RuntimeError(
+                    f"all_gather_tensor: tensor shape mismatch across ranks (rank 0 {tuple(reference.tolist())} vs rank {idx} {tuple(shape.tolist())})"
+                )
+
     tensors = [torch.zeros_like(tensor) for _ in range(world)]
     dist.all_gather(tensors, tensor)
     return torch.cat(tensors, dim=0)
@@ -177,5 +197,6 @@ __all__ = [
     "broadcast_object",
     "reduce_dict",
     "all_gather_tensor",
+    "get_local_rank",
     "cleanup",
 ]
