@@ -21,7 +21,8 @@ class VICRegLoss(nn.Module):
 
     def __init__(
         self,
-        lambda_invar: float = 25.0,
+        lambda_inv: float | None = None,
+        lambda_invar: float | None = None,
         mu_var: float = 25.0,
         nu_cov: float = 1.0,
         gamma: float = 1.0,
@@ -30,21 +31,34 @@ class VICRegLoss(nn.Module):
         """Initialize VICReg loss.
 
         Args:
-            lambda_invar: Weight for invariance (MSE) term.
+            lambda_inv: Weight for invariance (MSE) term. Preferred kw name.
+            lambda_invar: Deprecated alias for :param:`lambda_inv`.
             mu_var: Weight for variance hinge term.
             nu_cov: Weight for covariance off-diagonal penalty.
             gamma: Target minimum std per dimension.
             eps: Numerical stability for std and centering.
 
         Raises:
-            ValueError: If any weight <= 0 or gamma <= 0 or eps <= 0.
+            ValueError: If both lambda arguments provided or weights invalid.
         """
         super().__init__()
-        if lambda_invar <= 0 or mu_var <= 0 or gamma <= 0 or eps <= 0:
-            raise ValueError("lambda_invar, mu_var must be > 0 and gamma, eps > 0")
+
+        if lambda_inv is not None and lambda_invar is not None:
+            raise ValueError("Specify only one of lambda_inv or lambda_invar")
+        if lambda_inv is None and lambda_invar is None:
+            lambda_inv = 25.0
+        elif lambda_inv is None:
+            lambda_inv = lambda_invar
+
+        if lambda_inv is None:
+            raise ValueError("lambda_inv must be provided")
+
+        if lambda_inv <= 0 or mu_var <= 0 or gamma <= 0 or eps <= 0:
+            raise ValueError("lambda_inv, mu_var must be > 0 and gamma, eps > 0")
         if nu_cov < 0:
             raise ValueError("nu_cov must be >= 0")
-        self.lambda_invar = float(lambda_invar)
+
+        self.lambda_inv = float(lambda_inv)
         self.mu_var = float(mu_var)
         self.nu_cov = float(nu_cov)
         self.gamma = float(gamma)
@@ -71,7 +85,7 @@ class VICRegLoss(nn.Module):
         """
         if z1.ndim != 2 or z2.ndim != 2 or z1.shape != z2.shape:
             raise ValueError("z1 and z2 must be 2D tensors with identical shapes")
-        B = z1.shape[0]
+        B, _ = z1.shape
         if B < 2:
             raise ValueError("batch size must be >= 2 for VICReg")
 
@@ -98,7 +112,7 @@ class VICRegLoss(nn.Module):
             + ((_offdiag(Cy) ** 2).sum() / Cy.shape[0])
         )
 
-        loss = self.lambda_invar * mse + self.mu_var * var + self.nu_cov * cov
+        loss = self.lambda_inv * mse + self.mu_var * var + self.nu_cov * cov
         stats = {
             "mse": mse.detach(),
             "std_mean": 0.5 * (sx.mean() + sy.mean()).detach(),

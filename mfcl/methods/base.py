@@ -48,40 +48,35 @@ class BaseMethod(nn.Module):
             - Calls compute_loss
             - Returns stats dict including 'loss'
         """
-        # Ensure the module is on the same device as incoming tensors
-        try:
-            # Infer device from any tensor in the batch
-            dev: torch.device | None = None
-            if isinstance(batch, dict):
-                for v in batch.values():
-                    if torch.is_tensor(v):
-                        dev = v.device
-                        break
-                    if isinstance(v, (list, tuple)):
-                        for vv in v:
-                            if torch.is_tensor(vv):
-                                dev = vv.device
-                                break
-                        if dev is not None:
-                            break
-            if dev is not None:
-                # Only move if different device type or index
-                try:
-                    p = next(self.parameters(), None)
-                except Exception:
-                    p = None
-                cur_dev = getattr(p, "device", None) if p is not None else None
-                if cur_dev is None:
-                    try:
-                        b = next(self.buffers(), None)
-                    except Exception:
-                        b = None
-                    cur_dev = getattr(b, "device", None) if b is not None else None
-                if cur_dev is None or cur_dev != dev:
-                    self.to(dev)
-        except Exception:
-            # Best-effort; fall through if device inference/move fails
-            pass
+        p = next(self.parameters(), None)
+
+        def _first_tensor(data: Any) -> torch.Tensor | None:
+            if isinstance(data, dict):
+                for value in data.values():
+                    ft = _first_tensor(value)
+                    if ft is not None:
+                        return ft
+            elif torch.is_tensor(data):
+                return data
+            elif isinstance(data, (list, tuple)):
+                for value in data:
+                    ft = _first_tensor(value)
+                    if ft is not None:
+                        return ft
+            return None
+
+        if p is not None:
+            batch_tensor = _first_tensor(batch)
+            if (
+                batch_tensor is not None
+                and p.device != batch_tensor.device
+            ):
+                raise RuntimeError(
+                    "Model is on {model_device} but batch tensor is on {batch_device}. "
+                    "Move modules in the trainer, not inside the method.".format(
+                        model_device=p.device, batch_device=batch_tensor.device
+                    )
+                )
 
         proj = self.forward_views(batch)
         stats = self.compute_loss(*proj, batch=batch)
