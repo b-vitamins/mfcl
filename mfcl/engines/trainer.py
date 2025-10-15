@@ -96,6 +96,8 @@ class Trainer:
         self.method.to(self.device)
         # Track micro-batches between optimizer steps for accumulation-invariant scheduling
         self._sched_micro_batches = 0
+        # Global step counts processed micro-batches across the lifetime of the trainer
+        self._global_step = 0
 
     def fit(
         self,
@@ -117,7 +119,6 @@ class Trainer:
             save_every: Frequency in epochs to save checkpoints.
         """
         start_epoch = 1
-        global_step = 0
         if resume_path and os.path.exists(resume_path):
             state = load_checkpoint(resume_path, strict=False)
             if state:
@@ -135,7 +136,7 @@ class Trainer:
         world_size = get_world_size()
         train_state = {
             "epoch": start_epoch,
-            "global_step": global_step,
+            "global_step": self._global_step,
             "device": str(self.device),
             "world_size": world_size,
             "accum_steps": self.accum_steps,
@@ -145,14 +146,17 @@ class Trainer:
 
         for epoch in range(start_epoch, epochs + 1):
             train_state["epoch"] = epoch
+            train_state["global_step"] = self._global_step
             self.hooks.on_epoch_start(epoch, train_state)
             epoch_metrics = self.train_one_epoch(epoch, train_loader)
+            train_state["global_step"] = self._global_step
 
             # Save checkpoint
             if is_main_process() and self.save_dir and (epoch % save_every == 0):
                 os.makedirs(self.save_dir, exist_ok=True)
                 ckpt = {
                     "epoch": epoch,
+                    "global_step": self._global_step,
                     "method": self.method.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "scheduler": self.scheduler.state_dict() if self.scheduler else None,
@@ -224,6 +228,12 @@ class Trainer:
             dt = time.time() - step_start
             time_meter.update(dt)
             loss_meter.update(float(loss.detach().to(torch.float32).item()))
+
+            self._global_step += 1
+            hook_metrics = self._stats_to_floats(stats)
+            hook_metrics.setdefault("loss", float(loss.detach().to(torch.float32).item()))
+            hook_metrics.setdefault("lr", float(last_lr))
+            self.hooks.on_batch_end(self._global_step, hook_metrics)
 
             if is_main_process() and (
                 step % self.log_interval == 0 or step == total - 1
@@ -305,6 +315,21 @@ class Trainer:
             self._sched_micro_batches = 0
         return self.optimizer.param_groups[0]["lr"]
 
+    @staticmethod
+    def _stats_to_floats(stats: Dict[str, Any]) -> Dict[str, float]:
+        """Convert scalar-like entries in ``stats`` to floats for hooks/loggers."""
+        flat: Dict[str, float] = {}
+        for key, value in stats.items():
+            if torch.is_tensor(value):
+                if value.numel() == 1:
+                    flat[key] = float(value.detach().to(torch.float32).item())
+            else:
+                try:
+                    flat[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        return flat
+
     def to_device(self, obj: Any) -> Any:
         """Recursively move tensors in obj to self.device."""
         if torch.is_tensor(obj):
@@ -344,6 +369,8 @@ class Trainer:
         if self.scaler is not None:
             scaler_state = state.get("scaler", {})
             _maybe("scaler", scaler_state, self.scaler.load_state_dict)
+
+        self._global_step = int(state.get("global_step", self._global_step))
 
 
 __all__ = ["Trainer"]
