@@ -64,6 +64,9 @@ class MoCoContrastLoss(nn.Module):
             negs = negs.detach()
             if negs.device != q.device or negs.dtype != torch.float32:
                 negs = negs.to(device=q.device, dtype=torch.float32, non_blocking=True)
+            else:
+                # Break alias with queue storage so subsequent updates don't mutate logits
+                negs = negs.clone()
         else:
             raise ValueError("queue returned empty negatives")
 
