@@ -1,0 +1,6 @@
+data:
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  drop_last: true
+

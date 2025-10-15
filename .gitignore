@@ -87,26 +87,27 @@ logs/
 *.log
 
 # Stateful artifacts (data, runs, checkpoints, etc.)
-data/
-datasets/
-outputs/
-output/
-runs/
-checkpoints/
-ckpts/
-weights/
-models/
-artifacts/
-wandb/
-mlruns/
-lightning_logs/
-tensorboard/
-tb_logs/
-.cache/
-cache/
-tmp/
-temp/
-tmp*/
+# Anchor to repository root so package subdirs like mfcl/data or mfcl/models are not ignored.
+/data/
+/datasets/
+/outputs/
+/output/
+/runs/
+/checkpoints/
+/ckpts/
+/weights/
+/models/
+/artifacts/
+/wandb/
+/mlruns/
+/lightning_logs/
+/tensorboard/
+/tb_logs/
+/.cache/
+/cache/
+/tmp/
+/temp/
+/tmp*/
 *.tmp
 
 # Large ML weight artifacts
