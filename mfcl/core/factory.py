@@ -22,7 +22,6 @@ else:  # runtime import (type not used by checker here)
 
 from .registry import Registry
 from .config import Config
-from mfcl.models.encoders.timmwrap import TimmEncoder
 from mfcl.methods.base import BaseMethod
 
 
@@ -56,7 +55,18 @@ except (ImportError, ModuleNotFoundError) as err:
 except Exception as err:  # pragma: no cover - exercised via dedicated unit test
     raise RuntimeError("Unexpected error while registering ResNet encoders") from err
 
-ENCODER_REGISTRY.add("timm", TimmEncoder)
+try:
+    from mfcl.models.encoders.timmwrap import TimmEncoder
+
+    ENCODER_REGISTRY.add("timm", TimmEncoder)
+except (ImportError, ModuleNotFoundError) as err:
+    warnings.warn(
+        f"Optional timm encoder dependencies unavailable: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+except Exception as err:  # pragma: no cover - exercised via dedicated unit test
+    raise RuntimeError("Unexpected error while registering timm encoder") from err
 
 try:
     from mfcl.models.heads.projector import Projector
@@ -145,7 +155,9 @@ def _check_encoder_output_dim(
     """Sanity-check encoder forward output shape against config.
 
     Runs a forward pass on a dummy input to ensure the encoder returns a 2-D
-    tensor with the expected feature dimension.
+    tensor with the expected feature dimension. Assumes square ``img_size`` and
+    performs the check on CPU tensors; it does not validate dtype or
+    normalization semantics.
 
     Args:
         encoder: Backbone module.
@@ -349,7 +361,14 @@ def build_loss(cfg: Config) -> nn.Module:
 
 
 def build_method(cfg: Config) -> BaseMethod:
-    """Compose and instantiate a method with encoder and heads."""
+    """Compose and instantiate a method with encoder and heads.
+
+    Note:
+        This factory wires components explicitly instead of pulling classes from
+        :data:`METHOD_REGISTRY`. The registry remains public for extension code
+        that prefers dynamic composition, but keeping the construction explicit
+        here avoids ambiguity around heterogeneous method constructors.
+    """
     name = cfg.method.name.lower()
     if name == "simclr":
         encoder = build_encoder(cfg)
@@ -580,13 +599,16 @@ def build_data(
     else:
         from mfcl.data.collate import collate_pair as collate_fn
 
+    persist_workers = cfg.data.persistent_workers and cfg.data.num_workers > 0
+    # PyTorch forbids persistent_workers=True when num_workers==0.
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.data.batch_size,
         shuffle=cfg.data.shuffle,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers,
+        persistent_workers=persist_workers,
         drop_last=cfg.data.drop_last,
         collate_fn=collate_fn,
     )
@@ -599,7 +621,7 @@ def build_data(
             shuffle=False,
             num_workers=cfg.data.num_workers,
             pin_memory=cfg.data.pin_memory,
-            persistent_workers=cfg.data.persistent_workers,
+            persistent_workers=persist_workers,
             drop_last=False,
             collate_fn=collate_fn,
         )
@@ -665,48 +687,11 @@ def build_optimizer(cfg: Config, model: nn.Module) -> torch.optim.Optimizer:
     raise ValueError(f"Unsupported optimizer: {cfg.optim.name}")
 
 
-class _WarmupThenScheduler(torch.optim.lr_scheduler._LRScheduler):
-    """Linear warmup for a fixed number of epochs, then delegate to a scheduler."""
-
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        warmup_epochs: int,
-        after: Optional[SchedulerBase],
-    ) -> None:
-        self.warmup_epochs = int(warmup_epochs)
-        self.after: Optional[SchedulerBase] = after
-        self.last_epoch = -1
-        self.base_lrs = [group["lr"] for group in optimizer.param_groups]
-        super().__init__(optimizer)
-
-    def get_lr(self) -> List[float]:  # type: ignore[override]
-        epoch = self.last_epoch + 1
-        if self.warmup_epochs > 0 and epoch <= self.warmup_epochs:
-            scale = float(epoch) / float(max(1, self.warmup_epochs))
-            return [base * scale for base in self.base_lrs]
-        if self.after is not None:
-            # Step the underlying scheduler and mirror its lrs
-            self.after.last_epoch = self.last_epoch - self.warmup_epochs
-            lrs = self.after.get_lr()  # type: ignore[attr-defined]
-            return lrs
-        return [group["lr"] for group in self.optimizer.param_groups]
-
-    def step(self, epoch: Optional[int] = None) -> None:  # type: ignore[override]
-        if epoch is None:
-            self.last_epoch += 1
-        else:
-            self.last_epoch = epoch
-        if self.after is not None and (self.last_epoch > self.warmup_epochs):
-            self.after.step(self.last_epoch - self.warmup_epochs)
-        super().step(self.last_epoch)
-
-
 def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBase]:
     """Return a learning-rate scheduler with optional warmup.
 
-    The scheduler is intended to be stepped once per epoch by the training
-    engine. Warmup scales LR linearly for ``train.warmup_epochs`` epochs.
+    The trainer is responsible for stepping the returned scheduler (per epoch or
+    per batch). Warmup scales LR linearly for ``train.warmup_epochs`` epochs.
 
     Args:
         cfg: Global config.
@@ -715,16 +700,31 @@ def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBa
     Returns:
         A PyTorch LR scheduler or ``None`` for a constant LR.
     """
-    after: Optional[SchedulerBase] = None
+    warmup_epochs = int(max(0, cfg.train.warmup_epochs))
+    main_epochs = max(1, cfg.train.epochs - warmup_epochs)
+
     if cfg.train.cosine:
-        after = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.train.epochs)
+        after: Optional[SchedulerBase] = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=main_epochs
+        )
     else:
-        # Reasonable default: one step decay at 2/3 of training
-        step_sz = max(1, int(0.67 * cfg.train.epochs))
+        # Reasonable default: one step decay at ~2/3 of post-warmup training.
+        step_sz = max(1, int(0.67 * main_epochs))
         after = torch.optim.lr_scheduler.StepLR(opt, step_size=step_sz, gamma=0.1)
 
-    if cfg.train.warmup_epochs and cfg.train.warmup_epochs > 0:
-        return _WarmupThenScheduler(opt, cfg.train.warmup_epochs, after)
+    if warmup_epochs > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            opt,
+            start_factor=1e-8,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            opt,
+            schedulers=[warmup, after],
+            milestones=[warmup_epochs],
+        )
+
     return after
 
 
