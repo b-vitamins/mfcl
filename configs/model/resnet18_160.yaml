@@ -1,0 +1,9 @@
+model:
+  encoder: resnet18
+  encoder_dim: 512          # ResNet-18 pooled width
+  projector_hidden: 2048
+  projector_out: 128
+  predictor_hidden: 1024
+  predictor_out: 256
+  norm_feat: true
+

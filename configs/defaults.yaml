@@ -1,0 +1,18 @@
+# Base composition. Individual experiments override the group entries below.
+defaults:
+  - data: imagenet1k
+  - aug: simclr        # or swav
+  - model: resnet18_160
+  - model/head_mlp     # shared projector defaults
+  - method: simclr     # swap per experiment
+  - optim: sgd
+  - train: base
+  - train/schedule
+
+# Hydra runtime
+hydra:
+  run:
+    dir: runs/${method.name}_${model.encoder}_${aug.img_size}/${now:%Y%m%d_%H%M%S}
+  job:
+    name: ${method.name}
+

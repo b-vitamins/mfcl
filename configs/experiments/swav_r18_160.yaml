@@ -1,0 +1,15 @@
+defaults:
+  - override /data: imagenet1k
+  - override /aug: swav
+  - override /model: resnet18_160
+  - model/head_mlp
+  - override /method: swav
+  - override /optim: sgd
+  - override /train: base
+  - train/schedule
+
+method:
+  swav_prototypes: 3000
+  swav_sinkhorn_iters: 3
+  temperature: 0.1
+

@@ -1,0 +1,56 @@
+"""SimSiam symmetric negative-cosine loss with internal stopgrad."""
+
+from __future__ import annotations
+
+from typing import Dict, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SimSiamLoss(nn.Module):
+    """Symmetric negative cosine loss with internal stopgrad."""
+
+    def __init__(self, normalize: bool = True) -> None:
+        """Initialize SimSiam loss.
+
+        Args:
+            normalize: If True, L2-normalize p and z.
+        """
+        super().__init__()
+        self.normalize = bool(normalize)
+
+    def forward(
+        self,
+        p1: torch.Tensor,
+        z2: torch.Tensor,
+        p2: torch.Tensor,
+        z1: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Compute the SimSiam loss.
+
+        Args are the same as BYOLLoss; returns (loss, stats).
+        """
+        z1 = z1.detach()
+        z2 = z2.detach()
+
+        p1f = p1.to(torch.float32)
+        p2f = p2.to(torch.float32)
+        z1f = z1.to(torch.float32)
+        z2f = z2.to(torch.float32)
+
+        if self.normalize:
+            p1f = F.normalize(p1f, dim=1)
+            p2f = F.normalize(p2f, dim=1)
+            z1f = F.normalize(z1f, dim=1)
+            z2f = F.normalize(z2f, dim=1)
+
+        cos1 = torch.sum(p1f * z2f, dim=1)
+        cos2 = torch.sum(p2f * z1f, dim=1)
+        loss = -0.5 * (cos1.mean() + cos2.mean())
+        cos_sim = 0.5 * (cos1.mean() + cos2.mean())
+        return loss, {"cos_sim": cos_sim.detach()}
+
+
+__all__ = ["SimSiamLoss"]

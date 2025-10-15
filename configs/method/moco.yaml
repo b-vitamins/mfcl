@@ -1,0 +1,6 @@
+method:
+  name: moco
+  temperature: 0.2
+  moco_momentum: 0.999
+  moco_queue: 65536
+

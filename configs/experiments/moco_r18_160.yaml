@@ -1,0 +1,15 @@
+defaults:
+  - override /data: imagenet1k
+  - override /aug: simclr
+  - override /model: resnet18_160
+  - model/head_mlp
+  - override /method: moco
+  - override /optim: sgd
+  - override /train: base
+  - train/schedule
+
+method:
+  temperature: 0.2
+  moco_momentum: 0.999
+  moco_queue: 65536
+

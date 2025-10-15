@@ -1,0 +1,41 @@
+"""Barlow Twins method with projector and correlation identity objective."""
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
+import torch.nn as nn
+
+from mfcl.methods.base import BaseMethod
+from mfcl.models.heads.projector import Projector
+from mfcl.losses.barlowtwins import BarlowTwinsLoss
+
+
+class BarlowTwins(BaseMethod):
+    """Barlow Twins with projector and correlation identity objective."""
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        projector: Projector,
+        lambda_offdiag: float = 5e-3,
+        eps: float = 1e-4,
+    ) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.projector = projector
+        self.loss_fn = BarlowTwinsLoss(lambda_offdiag=lambda_offdiag, eps=eps)
+
+    def forward_views(self, batch: Dict[str, Any]):
+        z1 = self.projector(self.encoder(batch["view1"]))
+        z2 = self.projector(self.encoder(batch["view2"]))
+        return z1, z2
+
+    def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
+        z1, z2 = proj
+        loss, stats = self.loss_fn(z1, z2)  # type: ignore[arg-type]
+        stats["loss"] = loss
+        return stats
+
+
+__all__ = ["BarlowTwins"]

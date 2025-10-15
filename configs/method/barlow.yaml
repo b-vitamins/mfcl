@@ -1,0 +1,4 @@
+method:
+  name: barlow
+  barlow_lambda: 0.005
+

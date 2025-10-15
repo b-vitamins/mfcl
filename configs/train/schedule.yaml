@@ -1,0 +1,4 @@
+# LR scheduler semantics; trainer translates these to PyTorch schedulers.
+train:
+  scheduler_step_on: batch   # 'batch' or 'epoch'
+
