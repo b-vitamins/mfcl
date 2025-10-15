@@ -68,6 +68,45 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     # (not bitwise identical in general). Allow a small numerical tolerance.
     assert torch.allclose(w1, w2, atol=1.1e-1, rtol=1e-4)
 
+    # When the loader length is not a multiple of accum_steps, the remaining
+    # micro-batch should still produce an optimizer step (no gradients left
+    # dangling for the next epoch).
+    m_flush_base = LinearLossMethod()
+    opt_flush_base = torch.optim.SGD(m_flush_base.parameters(), lr=0.1)
+    sched_flush_base = torch.optim.lr_scheduler.StepLR(
+        opt_flush_base, step_size=1, gamma=0.1
+    )
+    t_flush_base = Trainer(
+        m_flush_base,
+        opt_flush_base,
+        scheduler=sched_flush_base,
+        console=ConsoleMonitor(),
+        save_dir=str(tmp_path / "r_flush_base"),
+        accum_steps=1,
+        scheduler_step_on="batch",
+    )
+    t_flush_base.fit(_loader_const(3), epochs=1)
+    w_flush_base = m_flush_base.w.detach().clone()
+
+    m_flush_accum = LinearLossMethod()
+    opt_flush_accum = torch.optim.SGD(m_flush_accum.parameters(), lr=0.1)
+    sched_flush_accum = torch.optim.lr_scheduler.StepLR(
+        opt_flush_accum, step_size=1, gamma=0.1
+    )
+    t_flush_accum = Trainer(
+        m_flush_accum,
+        opt_flush_accum,
+        scheduler=sched_flush_accum,
+        console=ConsoleMonitor(),
+        save_dir=str(tmp_path / "r_flush_accum"),
+        accum_steps=2,
+        scheduler_step_on="batch",
+    )
+    t_flush_accum.fit(_loader_const(3), epochs=1)
+    w_flush_accum = m_flush_accum.w.detach().clone()
+
+    assert torch.allclose(w_flush_base, w_flush_accum, atol=1.1e-1, rtol=1e-4)
+
     # Scheduler stepping per epoch vs batch
     m3 = LinearLossMethod()
     opt3 = torch.optim.SGD(m3.parameters(), lr=0.1)

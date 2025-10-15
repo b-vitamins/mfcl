@@ -1,4 +1,4 @@
-"""Barlow Twins loss: cross-correlation identity matching."""
+"""Barlow Twins cross-correlation loss implementation."""
 
 from __future__ import annotations
 
