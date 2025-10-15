@@ -1,3 +1,7 @@
+import importlib
+import sys
+import types
+
 import pytest
 import torch
 
@@ -60,3 +64,27 @@ def test_build_loss_enforces_contract(monkeypatch):
             F.build_loss(cfg)
     finally:
         LOSS_REGISTRY._map[key] = original  # type: ignore[attr-defined]
+
+
+def test_encoder_registration_bubbles_up_unexpected_errors():
+    key = "mfcl.models.encoders.resnet"
+    original_module = sys.modules.get(key)
+    failing_module = types.ModuleType("mfcl.models.encoders.resnet")
+
+    def _raise(_name: str) -> None:
+        raise RuntimeError("boom")
+
+    failing_module.__getattr__ = _raise  # type: ignore[attr-defined]
+    sys.modules[key] = failing_module
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            importlib.reload(F)
+    finally:
+        if original_module is not None:
+            sys.modules[key] = original_module
+        else:
+            sys.modules.pop(key, None)
+        importlib.reload(F)
+    assert excinfo.value.__cause__ is not None
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "boom"
