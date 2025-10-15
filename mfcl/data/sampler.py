@@ -13,7 +13,8 @@ class RepeatAugSampler(Sampler[int]):
     """Sampler that repeats each index 'repeats' times per epoch with reshuffling.
 
     Useful when each sample produces random multi-view augmentations and we want
-    more uniform coverage across workers.
+    more uniform coverage across workers. Repeated indices are shuffled after
+    repetition to reduce local duplicate clustering.
     """
 
     def __init__(
@@ -47,6 +48,11 @@ class RepeatAugSampler(Sampler[int]):
         self.drop_last = bool(drop_last)
         self.epoch = 0
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set current epoch to alter shuffling deterministically across epochs."""
+
+        self.epoch = int(epoch)
+
     def __len__(self) -> int:  # type: ignore[override]
         n = self._n
         base = n - (n % self.repeats) if self.drop_last else n
@@ -64,8 +70,10 @@ class RepeatAugSampler(Sampler[int]):
             indices = indices[:base_len]
         # Repeat each index 'repeats' times
         idxs = indices.repeat_interleave(self.repeats)
-        for i in idxs.tolist():
-            yield int(i)
+        if self.shuffle:
+            perm = torch.randperm(idxs.numel(), generator=g)
+            idxs = idxs[perm]
+        yield from (int(i) for i in idxs)
 
 
 class DistSamplerWrapper(Sampler[int]):
@@ -112,10 +120,9 @@ class DistSamplerWrapper(Sampler[int]):
     def __len__(self) -> int:  # type: ignore[override]
         if self._dist_sampler is not None:
             return len(self._dist_sampler)
-        n = self._n
         if self.drop_last:
-            return n - (n % 1)  # no replication here
-        return n
+            return self._n  # drop_last has no practical effect without replication
+        return self._n
 
     def __iter__(self) -> Iterator[int]:  # type: ignore[override]
         if self._dist_sampler is not None:
@@ -125,12 +132,10 @@ class DistSamplerWrapper(Sampler[int]):
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
         if self.shuffle:
-            perm = torch.randperm(n, generator=g).tolist()
-            for i in perm:
+            for i in torch.randperm(n, generator=g):
                 yield int(i)
-        else:
-            for i in range(n):
-                yield int(i)
+            return
+        yield from range(n)
 
 
 __all__ = ["RepeatAugSampler", "DistSamplerWrapper"]

@@ -29,7 +29,8 @@ def _make_chain(size: int, scale: Tuple[float, float], cfg: AugConfig) -> T.Comp
         ),
     ]
     if getattr(cfg, "solarize_prob", 0.0) and cfg.solarize_prob > 0:
-        chain.append(random_apply(Solarize(128), p=float(cfg.solarize_prob)))
+        thresh = int(getattr(cfg, "solarize_threshold", 128))
+        chain.append(random_apply(Solarize(thresh), p=float(cfg.solarize_prob)))
     chain.append(to_tensor_and_norm())
     return T.Compose(chain)
 
@@ -48,19 +49,25 @@ def build_multicrop_transforms(
 
     Returns:
         f(img) -> {
-          'crops': [Tensor[C,Hc,Wc], ...],   # length = cfg.global_crops + cfg.local_crops
-          'code_crops': (0, 1)               # indices of the two global crops
+          'crops': [Tensor[C,Hc,Wc], ...],   # global crops first, locals afterwards
+          'code_crops': (0, 1)               # fixed indices of the two global crops
         }
     """
+    if int(cfg.global_crops) < 2:
+        raise ValueError("global_crops must be >= 2 for code_crops=(0,1)")
+
     g_chain = _make_chain(cfg.img_size, global_scale, cfg)
-    l_chain = _make_chain(cfg.local_size, local_scale, cfg)
+    l_chain = None
+    if int(cfg.local_crops) > 0:
+        l_chain = _make_chain(cfg.local_size, local_scale, cfg)
 
     def multi(img) -> Dict[str, object]:
         crops: List[object] = []
         for _ in range(int(cfg.global_crops)):
             crops.append(g_chain(img))
-        for _ in range(int(cfg.local_crops)):
-            crops.append(l_chain(img))
+        if l_chain is not None:
+            for _ in range(int(cfg.local_crops)):
+                crops.append(l_chain(img))
         return {"crops": crops, "code_crops": (0, 1)}
 
     return multi

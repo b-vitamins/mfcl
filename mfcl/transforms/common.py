@@ -30,7 +30,8 @@ def gaussian_kernel_size(img_size: int, frac: float = 0.10) -> int:
         frac: Fraction of the width used for kernel size (typ. 0.10).
 
     Returns:
-        Odd integer >= 3.
+        Odd integer >= 3; e.g., ``img_size=160`` with ``frac=0.1`` produces
+        a kernel of approximately 17.
 
     Raises:
         ValueError: If img_size < 16 or frac <= 0.
@@ -51,8 +52,9 @@ class Solarize:
     """Deterministic solarize transform compatible with PIL images.
 
     Implements inversion of pixel values strictly greater than a threshold,
-    in a version-agnostic way that does not rely on the exact semantics of
-    the underlying PIL ImageOps implementation.
+    leaving others unchanged, in a version-agnostic way that does not rely on
+    the exact semantics of the underlying PIL ImageOps implementation.
+    Pixels strictly greater than threshold are inverted; others unchanged.
     """
 
     def __init__(self, threshold: int = 128):
@@ -60,7 +62,7 @@ class Solarize:
             raise ValueError("threshold must be in [0,255]")
         self.threshold = int(threshold)
 
-    def __call__(self, img):
+    def __call__(self, img: "Image.Image") -> "Image.Image":
         try:
             from PIL import Image
         except Exception as e:  # pragma: no cover - PIL is a transitive dep
@@ -72,6 +74,28 @@ class Solarize:
         mask = arr > self.threshold
         arr[mask] = 255 - arr[mask]
         return Image.fromarray(arr, mode=getattr(img, "mode", "RGB"))
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(threshold={self.threshold})"
+
+
+def _find_solarize_in_compose(comp: T.Compose) -> list[Solarize]:
+    """Return all Solarize transforms contained (recursively) in a Compose."""
+
+    def _collect(transform: object) -> list[Solarize]:
+        found: list[Solarize] = []
+        if isinstance(transform, Solarize):
+            found.append(transform)
+        inner = getattr(transform, "transforms", None)
+        if inner is not None:
+            for sub in inner:
+                found.extend(_collect(sub))
+        return found
+
+    result: list[Solarize] = []
+    for t in comp.transforms:
+        result.extend(_collect(t))
+    return result
 
 
 def build_color_jitter(strength: float) -> T.ColorJitter:

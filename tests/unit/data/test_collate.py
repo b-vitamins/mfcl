@@ -41,6 +41,12 @@ def test_collate_multicrop_validates_structure():
     malformed_code = {"crops": [torch.randn(3, 4, 4)], "code_crops": (0, 1, 2)}
     with pytest.raises(ValueError):
         collate_multicrop([(malformed_code, 0)])
+    bad_indices = {"crops": [torch.randn(3, 4, 4)], "code_crops": (0, 0)}
+    with pytest.raises(ValueError):
+        collate_multicrop([(bad_indices, 0)])
+    non_tensor = {"crops": ["nope", "still-nope"], "code_crops": (0, 1)}
+    with pytest.raises(TypeError):
+        collate_multicrop([(non_tensor, 0), (non_tensor, 1)])
 
 
 def test_collate_linear():

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 from mfcl.data.imagenet1k import ImageListDataset, build_imagenet_datasets
 from tests.helpers.data import make_synthetic_imagefolder
@@ -15,6 +17,16 @@ def test_imagelist_resolves_paths(tmp_path: Path):
     assert len(ds) == len(rels)
     sample, idx = ds[0]
     assert isinstance(sample, (dict, object))
+
+
+def test_imagelist_missing_file_message(tmp_path: Path):
+    lst = tmp_path / "train_list.txt"
+    lst.write_text("missing.png")
+    ds = ImageListDataset(str(tmp_path), str(lst))
+    with pytest.raises(FileNotFoundError) as exc:
+        ds[0]
+    assert "index 0" in str(exc.value)
+    assert "missing.png" in str(exc.value)
 
 
 def test_build_imagenet_datasets_imagefolder(tmp_path: Path):

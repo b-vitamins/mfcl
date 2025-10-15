@@ -26,6 +26,7 @@ def build_pair_transforms(cfg: AugConfig) -> Callable:
             - blur_prob: float
             - gray_prob: float
             - solarize_prob: float
+            - solarize_threshold: Optional[int]; defaults to 128 when absent.
 
     Returns:
         A function f(img) -> {'view1': Tensor[C,H,W], 'view2': Tensor[C,H,W]} where
@@ -44,7 +45,8 @@ def build_pair_transforms(cfg: AugConfig) -> Callable:
         ),
     ]
     if getattr(cfg, "solarize_prob", 0.0) and cfg.solarize_prob > 0:
-        chain.append(random_apply(Solarize(128), p=float(cfg.solarize_prob)))
+        thresh = int(getattr(cfg, "solarize_threshold", 128))
+        chain.append(random_apply(Solarize(thresh), p=float(cfg.solarize_prob)))
     chain.append(to_tensor_and_norm())
     transform = T.Compose(chain)
 
