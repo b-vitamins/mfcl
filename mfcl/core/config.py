@@ -144,6 +144,10 @@ def validate(cfg: Config) -> None:
         raise ValueError("moco requires method.moco_queue >= 1024")
     if cfg.method.name != "swav" and cfg.aug.local_crops > 0:
         raise ValueError("local_crops > 0 is only valid for swav")
+    if cfg.data.num_workers < 0:
+        raise ValueError("data.num_workers must be >= 0")
+    if cfg.method.name in {"simclr", "moco"} and cfg.method.temperature <= 0:
+        raise ValueError("method.temperature must be > 0 for simclr/moco")
 
 
 def to_omegaconf(cfg: Config) -> Any:

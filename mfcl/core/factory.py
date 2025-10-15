@@ -316,31 +316,42 @@ def build_loss(cfg: Config) -> nn.Module:
 
     try:
         with torch.no_grad():
-            B = 2
-            D = max(2, int(getattr(cfg.model, "projector_out", 16)))
-            name = method
-            if name == "simclr":
-                out = loss(torch.zeros(B, D), torch.zeros(B, D))
+            B, D = 4, int(getattr(cfg.model, "projector_out", 128))
+            name = cfg.method.name.lower()
+            device = torch.device("cpu")
+
+            if name in {"simclr", "byol", "simsiam", "barlow", "vicreg"}:
+                zeros = torch.zeros(B, D, device=device)
+                if name in {"byol", "simsiam"}:
+                    out = loss(zeros, zeros, zeros, zeros)
+                else:
+                    out = loss(zeros, zeros)
+
             elif name == "moco":
 
-                class _Q:
-                    def get(self):
-                        return torch.zeros(1, D)
+                class _FakeQueue:
+                    def __init__(self, k: int, d: int, device: torch.device):
+                        self._buf = torch.zeros(k, d, device=device)
 
-                out = loss(torch.zeros(B, D), torch.zeros(B, D), _Q())
-            elif name in {"byol", "simsiam"}:
+                    def get(self) -> torch.Tensor:
+                        return self._buf
+
+                K = max(1024, int(getattr(cfg.method, "moco_queue", 65536)))
+                fake_q = _FakeQueue(K, D, device)
                 out = loss(
-                    torch.zeros(B, D),
-                    torch.zeros(B, D),
-                    torch.zeros(B, D),
-                    torch.zeros(B, D),
+                    torch.zeros(B, D, device=device),
+                    torch.zeros(B, D, device=device),
+                    fake_q,
                 )
-            elif name in {"barlow", "vicreg"}:
-                out = loss(torch.zeros(B, D), torch.zeros(B, D))
+
             elif name == "swav":
                 K = int(getattr(cfg.method, "swav_prototypes", 64))
-                logits = [torch.zeros(B, K), torch.zeros(B, K)]
+                logits = [
+                    torch.zeros(B, K, device=device),
+                    torch.zeros(B, K, device=device),
+                ]
                 out = loss(logits, (0, 1))
+
             else:
                 out = None
             if out is not None:
@@ -564,6 +575,23 @@ def build_transforms(cfg: Config) -> Callable[[Any], Dict[str, Any]]:
     return ctor(cfg.aug)
 
 
+def _build_eval_transforms(cfg: Config) -> Callable:
+    """Deterministic single-crop eval transform (no jitter/blur)."""
+    from torchvision import transforms as T
+
+    return T.Compose(
+        [
+            T.Resize(cfg.aug.img_size),
+            T.CenterCrop(cfg.aug.img_size),
+            T.ToTensor(),
+            T.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
+        ]
+    )
+
+
 def build_data(
     cfg: Config,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
@@ -581,6 +609,7 @@ def build_data(
     """
     # Build transforms via registry
     transform = build_transforms(cfg)
+    eval_transform = _build_eval_transforms(cfg)
 
     # Build datasets via helper
     from mfcl.data.imagenet1k import build_imagenet_datasets
@@ -590,7 +619,7 @@ def build_data(
         train_list=cfg.data.train_list,
         val_list=cfg.data.val_list,
         train_transform=transform,
-        val_transform=transform,
+        val_transform=eval_transform,
     )
 
     # Collate selection depends on method
@@ -670,6 +699,12 @@ def build_optimizer(cfg: Config, model: nn.Module) -> torch.optim.Optimizer:
 
     if name == "sgd" or name == "lars":
         # LARS handled as SGD for now; a proper LARS adapter can be swapped in later.
+        if name == "lars":
+            warnings.warn(
+                "Optimizer 'lars' is currently mapped to SGD; a proper LARS adapter can be swapped later.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return torch.optim.SGD(
             params,
             lr=cfg.optim.lr,
