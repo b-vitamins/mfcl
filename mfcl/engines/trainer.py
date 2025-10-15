@@ -222,7 +222,7 @@ class Trainer:
             if self.scheduler and self.scheduler_step_on == "batch":
                 self._sched_micro_batches += 1
             if do_step:
-                last_lr = self._apply_optimizer_step()
+                last_lr = self._apply_optimizer_step(self.accum_steps)
 
             # Update meters and console
             dt = time.time() - step_start
@@ -265,7 +265,7 @@ class Trainer:
         # accumulation factor. Without this step, the trailing micro-batches would
         # never update the model parameters and would leak into the next epoch.
         if count > 0 and (count % self.accum_steps) != 0:
-            last_lr = self._apply_optimizer_step()
+            last_lr = self._apply_optimizer_step(count % self.accum_steps)
 
         # Epoch-level reduce (loss)
         reduce_map = {
@@ -293,10 +293,22 @@ class Trainer:
             "time_per_batch": float(time_meter.global_avg),
         }
 
-    def _apply_optimizer_step(self) -> float:
+    def _apply_optimizer_step(self, micro_batches_in_step: int) -> float:
         """Apply an optimizer step handling AMP, clipping and scheduling."""
         # Unscale before optional gradient clipping to avoid scaling issues
         self.scaler.unscale_(self.optimizer)
+        if micro_batches_in_step <= 0:
+            raise ValueError("micro_batches_in_step must be positive")
+        if micro_batches_in_step != self.accum_steps:
+            # Scale gradients so the effective average matches the actual micro-batch
+            # count for this optimizer step. Without this adjustment the gradients
+            # from a short accumulation window (e.g. epoch flush) would be scaled
+            # down by ``micro_batches_in_step / self.accum_steps``.
+            scale = self.accum_steps / float(micro_batches_in_step)
+            for group in self.optimizer.param_groups:
+                for p in group.get("params", []):
+                    if p.grad is not None:
+                        p.grad.detach().mul_(scale)
         if self.clip_grad is not None:
             torch.nn.utils.clip_grad_norm_(
                 self.method.parameters(), max_norm=float(self.clip_grad)
