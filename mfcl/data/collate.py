@@ -58,16 +58,22 @@ def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCr
         - Assumes that for all items, the number of crops and their spatial sizes
           by position are identical (enforced by the transform builder).
     """
+    if not batch:
+        raise ValueError("batch must contain at least one element")
+
     first, _ = batch[0]
     f = cast(MultiCropSample, first)
-    crops0 = f["crops"]
-    assert isinstance(crops0, list)
+    crops0 = f.get("crops")
+    if not isinstance(crops0, list):
+        raise TypeError("sample['crops'] must be a list of tensors")
     n_crops = len(crops0)
     # Validate code_crops consistency
-    code_crops = f["code_crops"]
+    code_crops = f.get("code_crops")
+    if not isinstance(code_crops, tuple) or len(code_crops) != 2:
+        raise ValueError("sample['code_crops'] must be a tuple of length 2")
     for sample, _ in batch[1:]:
         s = cast(MultiCropSample, sample)
-        if s["code_crops"] != code_crops:
+        if s.get("code_crops") != code_crops:
             raise ValueError("code_crops mismatch across batch")
 
     stacked: List[torch.Tensor] = []
@@ -76,7 +82,12 @@ def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCr
         size_ref = None
         for sample, _ in batch:
             s = cast(MultiCropSample, sample)
-            t = s["crops"][i]
+            crops = s.get("crops")
+            if not isinstance(crops, list):
+                raise TypeError("sample['crops'] must be a list of tensors")
+            if i >= len(crops):
+                raise ValueError("inconsistent number of crops across batch")
+            t = crops[i]
             if size_ref is None:
                 size_ref = tuple(t.shape)
             elif tuple(t.shape) != size_ref:

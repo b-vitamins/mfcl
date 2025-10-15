@@ -17,6 +17,25 @@ class MomentumUpdater:
             target: Destination updated as m*target + (1-m)*online.
             momentum: EMA coefficient in [0,1).
         """
+        if not 0.0 <= momentum < 1.0:
+            raise ValueError("momentum must be in the range [0, 1)")
+
+        # Validate that modules share identical parameter/buffer structure so that
+        # zip-based updates do not silently drop values when one module has more
+        # elements than the other (which could happen when architectures diverge).
+        online_param_count = sum(1 for _ in online.parameters())
+        target_param_count = sum(1 for _ in target.parameters())
+        if online_param_count != target_param_count:
+            raise ValueError(
+                "online and target modules must expose the same number of parameters"
+            )
+        online_buffer_count = sum(1 for _ in online.buffers())
+        target_buffer_count = sum(1 for _ in target.buffers())
+        if online_buffer_count != target_buffer_count:
+            raise ValueError(
+                "online and target modules must expose the same number of buffers"
+            )
+
         self.online = online
         self.target = target
         self.m = float(momentum)

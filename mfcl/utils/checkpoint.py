@@ -68,11 +68,21 @@ def _prune_old_checkpoints(path: str, keep_k: int) -> None:
     ]
     if not all_matches:
         return
-    all_matches.sort()
-    to_remove = all_matches[:-keep_k]
+    try:
+        all_matches.sort(
+            key=lambda p: (os.path.getmtime(p), p),
+            reverse=True,
+        )
+    except OSError:
+        # If mtimes cannot be read (e.g., removed concurrently), fall back to lexic order
+        all_matches.sort()
+    to_remove = all_matches[keep_k:]
     for p in to_remove:
         try:
             os.remove(p)
+        except FileNotFoundError:
+            # File already gone; nothing to prune
+            continue
         except Exception as e:
             raise RuntimeError(f"Failed to prune old checkpoint: {p}") from e
 
@@ -166,8 +176,14 @@ def latest_checkpoint(dir_path: str, pattern: str = "ckpt_ep*.pt") -> Optional[s
     ]
     if not matches:
         return None
-    matches.sort()
-    return matches[-1]
+    try:
+        matches.sort(
+            key=lambda p: (os.path.getmtime(p), p),
+            reverse=True,
+        )
+    except OSError:
+        matches.sort()
+    return matches[0]
 
 
 __all__ = ["save_checkpoint", "load_checkpoint", "latest_checkpoint", "StateDict"]
