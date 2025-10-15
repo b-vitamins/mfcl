@@ -53,6 +53,7 @@ class Trainer:
         accum_steps: int = 1,
         clip_grad: Optional[float] = None,
         scheduler_step_on: str = "batch",
+        guard_grad_nan: bool = False,
     ) -> None:
         """Construct the trainer.
 
@@ -70,6 +71,7 @@ class Trainer:
             accum_steps: Gradient accumulation steps per optimizer update (>=1).
             clip_grad: Max norm for gradient clipping (None disables).
             scheduler_step_on: Step scheduler per 'batch' or per 'epoch'.
+            guard_grad_nan: If True, raise when gradients contain NaN or Inf.
         """
         self.method: _TrainableMethod = method
         self.optimizer = optimizer
@@ -92,6 +94,7 @@ class Trainer:
         if scheduler_step_on not in {"batch", "epoch"}:
             raise ValueError("scheduler_step_on must be 'batch' or 'epoch'")
         self.scheduler_step_on = scheduler_step_on
+        self.guard_grad_nan = bool(guard_grad_nan)
 
         self.method.to(self.device)
         # Track micro-batches between optimizer steps for accumulation-invariant scheduling
@@ -207,9 +210,14 @@ class Trainer:
                 if "loss" not in stats:
                     raise KeyError("Method step() must return dict with key 'loss'")
                 loss = stats["loss"]
-            if not torch.isfinite(loss):
+            finite = torch.isfinite(loss.detach())
+            if finite.dim() == 0:
+                finite_flag = bool(finite.item())
+            else:
+                finite_flag = bool(finite.all().item())
+            if not finite_flag:
                 self.console.newline()
-                raise RuntimeError("Loss exploded")
+                raise RuntimeError("Loss exploded (non-finite scalar encountered)")
 
             loss_to_backward = loss / self.accum_steps
             self.scaler.scale(loss_to_backward).backward()
@@ -235,8 +243,9 @@ class Trainer:
             hook_metrics.setdefault("lr", float(last_lr))
             self.hooks.on_batch_end(self._global_step, hook_metrics)
 
+            should_tail = (total > 0 and step == total - 1)
             if is_main_process() and (
-                step % self.log_interval == 0 or step == total - 1
+                step % self.log_interval == 0 or should_tail
             ):
                 # Pull a few optional stats if present
                 metrics: Dict[str, float] = {
@@ -313,6 +322,16 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(
                 self.method.parameters(), max_norm=float(self.clip_grad)
             )
+        if self.guard_grad_nan:
+            total_norm = 0.0
+            for group in self.optimizer.param_groups:
+                for p in group.get("params", []):
+                    if p.grad is not None:
+                        v = p.grad.detach()
+                        if torch.any(torch.isnan(v)) or torch.any(torch.isinf(v)):
+                            raise RuntimeError("Detected NaN/Inf in gradients")
+                        total_norm += float(v.norm(2).detach().item() ** 2)
+            # total_norm retained for potential debugging/logging hooks.
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
@@ -322,8 +341,12 @@ class Trainer:
             except Exception:
                 pass
         if self.scheduler and self.scheduler_step_on == "batch":
-            for _ in range(self._sched_micro_batches):
-                self.scheduler.step()
+            # Step scheduler once per micro-batch since the last optimizer step to
+            # emulate "per-batch" schedules under gradient accumulation.
+            steps = int(self._sched_micro_batches)
+            if steps > 0:
+                for _ in range(steps):
+                    self.scheduler.step()
             self._sched_micro_batches = 0
         return self.optimizer.param_groups[0]["lr"]
 
@@ -349,8 +372,19 @@ class Trainer:
         if isinstance(obj, dict):
             return {k: self.to_device(v) for k, v in obj.items()}
         if isinstance(obj, (list, tuple)):
-            t = [self.to_device(x) for x in obj]
-            return type(obj)(t) if isinstance(obj, tuple) else t
+            seq = [self.to_device(x) for x in obj]
+            if isinstance(obj, tuple):
+                # Preserve namedtuple types if possible
+                try:
+                    if hasattr(obj, "_fields"):
+                        return type(obj)(*seq)
+                    return type(obj)(seq)
+                except TypeError:
+                    try:
+                        return type(obj)(*seq)
+                    except TypeError:
+                        return tuple(seq)
+            return seq
         return obj
 
     def _restore_checkpoint_state(self, state: Dict[str, Any]) -> None:
