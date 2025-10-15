@@ -54,30 +54,46 @@ class Registry:
                 f"Registry key '{key}' contains invalid characters. Use only [a-z0-9-]."
             )
 
-    def add(self, key: str, obj: Callable[..., Any]) -> None:
+    def add(self, key: str, obj: Callable[..., Any], *, strict: bool = True) -> None:
         """Register ``obj`` under ``key``.
 
         Args:
             key: Unique identifier (lowercase, alnum + dash allowed).
             obj: Class or callable (constructor) to instantiate later.
+            strict: If ``True`` (default), refuse to overwrite existing keys.
+                Set to ``False`` to replace an existing registration explicitly.
 
         Raises:
             TypeError: If key is not str or obj is not callable/class.
             ValueError: If key is empty or not normalized.
-            KeyError: If key already exists.
+            KeyError: If key already exists and ``strict`` is ``True``.
         """
         self._validate_key(key)
         if not callable(obj):
             raise TypeError(
                 f"Object registered under key '{key}' must be callable or a class."
             )
-        if key in self._map:
-            raise KeyError(f"Key '{key}' already exists in '{self.name}' registry.")
+        if key in self._map and strict:
+            raise KeyError(
+                f"Key '{key}' already exists in '{self.name}' registry; pass strict=False to overwrite."
+            )
         self._map[key] = obj
 
     def has(self, key: str) -> bool:
         """Return True if ``key`` exists in registry."""
         return key in self._map
+
+    def __contains__(self, key: str) -> bool:
+        """Alias for :meth:`has` enabling ``key in registry`` syntax."""
+        return self.has(key)
+
+    def __len__(self) -> int:
+        """Return the number of registered keys."""
+        return len(self._map)
+
+    def __repr__(self) -> str:
+        """Debug-friendly representation showing registry name and size."""
+        return f"Registry(name={self.name!r}, keys={len(self._map)})"
 
     def get(self, key: str) -> Callable[..., Any]:
         """Retrieve a previously registered object.
@@ -90,13 +106,13 @@ class Registry:
 
         Raises:
             KeyError: If key not found. The message includes the registry name
-                and up to 20 available keys for quick discovery.
+                and up to 50 available keys for quick discovery.
         """
         try:
             return self._map[key]
         except KeyError as e:
             keys: List[str] = sorted(self._map.keys())
-            hint = ", ".join(keys[:20]) if keys else "<empty>"
+            hint = ", ".join(keys[:50]) if keys else "<empty>"
             raise KeyError(
                 f"Key '{key}' not found in '{self.name}' registry. Available: {hint}"
             ) from e

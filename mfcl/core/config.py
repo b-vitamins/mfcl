@@ -7,13 +7,20 @@ from OmegaConf without requiring Hydra at import time.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Tuple
 
 
 @dataclass
 class DataConfig:
-    """Dataset and dataloader options."""
+    """Dataset and dataloader options.
+
+    Note:
+        ``persistent_workers`` is ignored when ``num_workers`` is zero because
+        PyTorch disallows that combination. ``factory.build_data`` enforces the
+        safe behavior at runtime.
+    """
 
     root: str
     train_list: str | None = None
@@ -93,8 +100,8 @@ class TrainConfig:
     save_dir: str = "runs/simclr_r18_160"
     seed: int = 42
     log_interval: int = 50  # batches
-    # Step LR scheduler on 'batch' or 'epoch'
-    scheduler_step_on: str = "batch"
+    # Reserved for trainer control; factory is agnostic to step granularity.
+    scheduler_step_on: str = "epoch"
 
 
 @dataclass
@@ -135,6 +142,12 @@ def validate(cfg: Config) -> None:
         raise ValueError("swav requires aug.global_crops >= 2")
     if cfg.method.name == "moco" and cfg.method.moco_queue < 1024:
         raise ValueError("moco requires method.moco_queue >= 1024")
+    if cfg.method.name != "swav" and cfg.aug.local_crops > 0:
+        raise ValueError("local_crops > 0 is only valid for swav")
+    if cfg.data.num_workers < 0:
+        raise ValueError("data.num_workers must be >= 0")
+    if cfg.method.name in {"simclr", "moco", "swav"} and cfg.method.temperature <= 0:
+        raise ValueError("method.temperature must be > 0 for simclr/moco/swav")
 
 
 def to_omegaconf(cfg: Config) -> Any:
@@ -150,12 +163,18 @@ def to_omegaconf(cfg: Config) -> Any:
     """
     try:
         from omegaconf import OmegaConf  # type: ignore
-
-        return OmegaConf.create(asdict(cfg))
-    except Exception:
+    except ImportError:
         # Degrade gracefully when OmegaConf is not available by returning
         # a plain dict that from_omegaconf can consume.
         return asdict(cfg)
+
+    try:
+        return OmegaConf.create(asdict(cfg))
+    except Exception as exc:
+        raise RuntimeError(
+            "OmegaConf.create failed while converting Config: "
+            f"{exc.__class__.__name__}: {exc}"
+        ) from exc
 
 
 def _to_plain_dict(oc: Any) -> Dict[str, Any]:
@@ -170,10 +189,14 @@ def _to_plain_dict(oc: Any) -> Dict[str, Any]:
 
         if isinstance(oc, (DictConfig, ListConfig)):
             return OmegaConf.to_container(oc, resolve=True)  # type: ignore
-    except Exception:
+    except ImportError:
         pass
-    # Fallback: assume it's already a dict-like.
-    return dict(oc)
+
+    if isinstance(oc, Mapping):
+        return dict(oc)
+    raise TypeError(
+        f"from_omegaconf expects a mapping-like object, got {type(oc).__name__}"
+    )
 
 
 def from_omegaconf(oc: Any) -> Config:
