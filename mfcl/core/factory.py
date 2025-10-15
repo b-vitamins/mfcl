@@ -232,7 +232,10 @@ def build_heads(cfg: Config) -> Dict[str, nn.Module]:
         use_bn=True,
     )
 
-    needs_predictor = cfg.method.name in {"byol", "simsiam"}
+    method_name = cfg.method.name
+    method = method_name.lower()
+
+    needs_predictor = method in {"byol", "simsiam"}
     # Allow methods to override by requesting predictor explicitly via constructor.
     if needs_predictor:
         pred_ctor = HEAD_REGISTRY.get("predictor")
@@ -256,7 +259,8 @@ def build_loss(cfg: Config) -> nn.Module:
     Returns:
         An ``nn.Module`` implementing the loss.
     """
-    method = cfg.method.name
+    method_name = cfg.method.name
+    method = method_name.lower()
     key_map = {
         "simclr": "ntxent",
         "moco": "mococontrast",
@@ -268,7 +272,7 @@ def build_loss(cfg: Config) -> nn.Module:
     }
     loss_key = key_map.get(method)
     if loss_key is None:
-        raise KeyError(f"No loss mapping for method '{method}'.")
+        raise KeyError(f"No loss mapping for method '{method_name}'.")
     loss_ctor = LOSS_REGISTRY.get(loss_key)
     # Instantiate with method-relevant arguments when applicable.
     if loss_key == "ntxent":
@@ -302,7 +306,7 @@ def build_loss(cfg: Config) -> nn.Module:
         with torch.no_grad():
             B = 2
             D = max(2, int(getattr(cfg.model, "projector_out", 16)))
-            name = cfg.method.name.lower()
+            name = method
             if name == "simclr":
                 out = loss(torch.zeros(B, D), torch.zeros(B, D))
             elif name == "moco":

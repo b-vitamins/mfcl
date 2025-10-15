@@ -66,6 +66,43 @@ def test_build_loss_enforces_contract(monkeypatch):
         LOSS_REGISTRY._map[key] = original  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "method_name, expect_predictor, expected_loss",
+    [
+        ("SIMCLR", False, "NTXentLoss"),
+        ("MoCo", False, "MoCoContrastLoss"),
+        ("BYOL", True, "BYOLLoss"),
+        ("SimSiam", True, "SimSiamLoss"),
+    ],
+)
+def test_factory_is_case_insensitive(monkeypatch, method_name, expect_predictor, expected_loss):
+    monkeypatch.setattr(
+        F, "build_encoder", lambda cfg: TinyEncoder(cfg.model.encoder_dim)
+    )
+    cfg = Config(
+        data=DataConfig(root="/tmp"),
+        aug=AugConfig(img_size=32),
+        model=ModelConfig(
+            encoder="resnet18",
+            encoder_dim=16,
+            projector_hidden=32,
+            projector_out=8,
+            predictor_hidden=16,
+            predictor_out=8,
+        ),
+        method=MethodConfig(name=method_name, temperature=0.2),
+        optim=OptimConfig(),
+        train=TrainConfig(),
+    )
+
+    heads = F.build_heads(cfg)
+    assert ("predictor" in heads) is expect_predictor
+
+    loss = F.build_loss(cfg)
+    assert loss.__class__.__name__ == expected_loss
+
+    # The original casing should remain untouched to avoid side effects.
+    assert cfg.method.name == method_name
 def test_encoder_registration_bubbles_up_unexpected_errors():
     key = "mfcl.models.encoders.resnet"
     original_module = sys.modules.get(key)
