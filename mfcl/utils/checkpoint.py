@@ -177,7 +177,12 @@ def latest_checkpoint(dir_path: str, pattern: str = "ckpt_ep*.pt") -> Optional[s
         Path to latest checkpoint or None if none found.
     """
     latest = os.path.join(dir_path, "latest.pt")
-    if os.path.exists(latest):
+    if os.path.islink(latest):
+        target = os.readlink(latest)
+        resolved = target if os.path.isabs(target) else os.path.join(dir_path, target)
+        if os.path.exists(resolved):
+            return resolved
+    elif os.path.exists(latest):
         return latest
     matches = [
         p for p in glob.glob(os.path.join(dir_path, pattern)) if os.path.isfile(p)

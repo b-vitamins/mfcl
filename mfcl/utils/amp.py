@@ -128,7 +128,7 @@ class AmpScaler:
         return self._enabled
 
     @property
-    def scaler(self) -> Optional[torch.cuda.amp.GradScaler]:
+    def scaler(self) -> Optional[Any]:
         """Return underlying GradScaler or None when disabled."""
 
         return self._scaler

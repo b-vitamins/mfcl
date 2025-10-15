@@ -58,6 +58,8 @@ class ConsoleMonitor:
             total: Total batches per epoch.
             metrics: Mapping of metric name to scalar float.
             metric_order: Optional explicit ordering for metrics when displaying.
+        Notes:
+            ETA renders as 00:00:00 when total or step are non-positive.
         """
         now = time.time()
         dt = max(1e-9, now - self._last_ts)

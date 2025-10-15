@@ -129,14 +129,14 @@ def reduce_dict(
         raise ValueError("op must be 'mean' or 'sum'")
 
     if not is_dist():
-        return {k: v.clone() for k, v in tensors.items()}
+        return {k: v.detach().clone() for k, v in tensors.items()}
 
     reduced: Dict[str, torch.Tensor] = {}
     world = get_world_size()
     for k, v in tensors.items():
         if not torch.is_tensor(v):  # pragma: no cover - defensive
             raise TypeError(f"Value for key '{k}' must be a torch.Tensor")
-        t = v.clone()
+        t = v.detach().clone()
         reduce_op = getattr(dist, "ReduceOp", None)
         if reduce_op is not None and hasattr(reduce_op, "SUM"):
             dist.all_reduce(t, op=reduce_op.SUM)

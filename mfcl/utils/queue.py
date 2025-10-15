@@ -68,7 +68,7 @@ class RingQueue:
 
         self.ptr = 0
         self.full = False
-        if zero and self.buf.device.type == "cpu":
+        if zero:
             self.buf.zero_()
 
 
