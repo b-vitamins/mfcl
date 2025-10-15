@@ -188,6 +188,7 @@ class Trainer:
         total = len(loader) if isinstance(loader, _Sized) else 0
         last_lr = self.optimizer.param_groups[0]["lr"]
         self.optimizer.zero_grad(set_to_none=True)
+        self._sched_micro_batches = 0
         # t0 = time.time()
 
         # Running sums for epoch-level reduction
@@ -217,27 +218,7 @@ class Trainer:
             if self.scheduler and self.scheduler_step_on == "batch":
                 self._sched_micro_batches += 1
             if do_step:
-                # Unscale then clip
-                self.scaler.unscale_(self.optimizer)
-                if self.clip_grad is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.method.parameters(), max_norm=float(self.clip_grad)
-                    )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
-                if hasattr(self.method, "on_optimizer_step"):
-                    try:
-                        self.method.on_optimizer_step()
-                    except Exception:
-                        pass
-                # Advance scheduler by the number of micro-batches since the last
-                # optimizer step to keep LR scheduling invariant to accumulation.
-                if self.scheduler and self.scheduler_step_on == "batch":
-                    for _ in range(self._sched_micro_batches):
-                        self.scheduler.step()
-                    self._sched_micro_batches = 0
-                last_lr = self.optimizer.param_groups[0]["lr"]
+                last_lr = self._apply_optimizer_step()
 
             # Update meters and console
             dt = time.time() - step_start
@@ -270,6 +251,12 @@ class Trainer:
                             continue
                 self.console.live(epoch, step + 1, total, metrics)
 
+        # Flush gradients if the final micro-batch count does not evenly divide the
+        # accumulation factor. Without this step, the trailing micro-batches would
+        # never update the model parameters and would leak into the next epoch.
+        if count > 0 and (count % self.accum_steps) != 0:
+            last_lr = self._apply_optimizer_step()
+
         # Epoch-level reduce (loss)
         reduce_map = {
             "sum_loss": torch.tensor(sum_loss, device=self.device),
@@ -295,6 +282,28 @@ class Trainer:
             "lr": float(last_lr),
             "time_per_batch": float(time_meter.global_avg),
         }
+
+    def _apply_optimizer_step(self) -> float:
+        """Apply an optimizer step handling AMP, clipping and scheduling."""
+        # Unscale before optional gradient clipping to avoid scaling issues
+        self.scaler.unscale_(self.optimizer)
+        if self.clip_grad is not None:
+            torch.nn.utils.clip_grad_norm_(
+                self.method.parameters(), max_norm=float(self.clip_grad)
+            )
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        if hasattr(self.method, "on_optimizer_step"):
+            try:
+                self.method.on_optimizer_step()
+            except Exception:
+                pass
+        if self.scheduler and self.scheduler_step_on == "batch":
+            for _ in range(self._sched_micro_batches):
+                self.scheduler.step()
+            self._sched_micro_batches = 0
+        return self.optimizer.param_groups[0]["lr"]
 
     def to_device(self, obj: Any) -> Any:
         """Recursively move tensors in obj to self.device."""
