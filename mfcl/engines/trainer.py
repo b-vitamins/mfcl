@@ -152,6 +152,11 @@ class Trainer:
             train_state["global_step"] = self._global_step
             self.hooks.on_epoch_start(epoch, train_state)
             epoch_metrics = self.train_one_epoch(epoch, train_loader)
+            # Ensure downstream hooks receive the epoch number alongside metrics so
+            # they can align their internal schedules with the trainer state.
+            if "epoch" not in epoch_metrics:
+                epoch_metrics = dict(epoch_metrics)
+                epoch_metrics["epoch"] = epoch
             train_state["global_step"] = self._global_step
 
             # Save checkpoint
