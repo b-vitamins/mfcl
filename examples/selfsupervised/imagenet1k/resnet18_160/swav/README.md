@@ -21,4 +21,5 @@ python visual.py --runs runs/swav_resnet18_160/2025...
 **Notes**
 
 * Multi-crop with Sinkhorn assignments and prototypes.
+  * Adjust `data.batch_size` and `data.num_workers` for your hardware. On a 12 GB RTX 3060, start with `data.batch_size=192` at 160 px.
 
