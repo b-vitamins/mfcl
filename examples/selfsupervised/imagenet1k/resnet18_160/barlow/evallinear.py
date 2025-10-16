@@ -45,13 +45,14 @@ def _build_eval_loaders(cfg: Config):
     tds = datasets.ImageFolder(tr, transform=tfm)
     vds = datasets.ImageFolder(vr, transform=tfm)
     num_classes = len(tds.classes)
+    persistent = bool(getattr(cfg.data, "persistent_workers", False) and cfg.data.num_workers > 0)
     tloader = DataLoader(
         tds,
         batch_size=cfg.data.batch_size,
         shuffle=True,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers,
+        persistent_workers=persistent,
     )
     vloader = DataLoader(
         vds,
@@ -59,7 +60,7 @@ def _build_eval_loaders(cfg: Config):
         shuffle=False,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers,
+        persistent_workers=persistent,
     )
     return tloader, vloader, num_classes
 
