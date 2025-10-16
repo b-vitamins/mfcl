@@ -27,6 +27,8 @@ def test_pair_transforms_respects_solarize_threshold():
     )
     cfg.solarize_threshold = 37
     tf = build_pair_transforms(cfg)
-    compose = tf.__closure__[0].cell_contents
+    closure = tf.__closure__
+    assert closure is not None and len(closure) >= 1
+    compose = closure[0].cell_contents
     found = _find_solarize_in_compose(compose)
     assert found and found[0].threshold == 37

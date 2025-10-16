@@ -7,11 +7,12 @@ vector per image (or the last feature map, if requested).
 from __future__ import annotations
 
 import warnings
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.modules.utils import _pair
 
 
 _VARIANT_TO_DIM = {
@@ -65,6 +66,8 @@ class ResNetEncoder(nn.Module):
 
     Removes the classification head and applies global average pooling.
     """
+
+    backbone: nn.Module
 
     def __init__(
         self,
@@ -120,7 +123,7 @@ class ResNetEncoder(nn.Module):
             raise ValueError("in_channels must be >= 1")
         self._feat_dim = _VARIANT_TO_DIM.get(variant, 0)
 
-        backbone = _create_tv_resnet(variant, pretrained=pretrained)
+        backbone: nn.Module = _create_tv_resnet(variant, pretrained=pretrained)
         # Remove classifier head to expose features
         backbone.fc = nn.Identity()
         if self.in_channels != getattr(backbone.conv1, "in_channels", self.in_channels):
@@ -128,9 +131,9 @@ class ResNetEncoder(nn.Module):
             new_conv = nn.Conv2d(
                 self.in_channels,
                 old_conv.out_channels,
-                kernel_size=old_conv.kernel_size,
-                stride=old_conv.stride,
-                padding=old_conv.padding,
+                kernel_size=_to_pair(old_conv.kernel_size),
+                stride=_to_pair(old_conv.stride),
+                padding=_to_pair(old_conv.padding),
                 bias=False,
             )
             if pretrained:
@@ -148,7 +151,7 @@ class ResNetEncoder(nn.Module):
                         adapted = base.repeat(1, self.in_channels, 1, 1)
                     new_conv.weight.data.copy_(adapted)
             backbone.conv1 = new_conv
-        self.backbone = backbone
+        self.backbone: nn.Module = backbone
         self.pool = nn.AdaptiveAvgPool2d(1) if pool == "avg" else nn.Identity()
 
         if not train_bn:
@@ -268,3 +271,8 @@ __all__ = [
     "make_resnet34",
     "make_resnet50",
 ]
+def _to_pair(value: Any) -> tuple[int, int]:
+    """Return a 2-tuple representation for Conv2d arguments."""
+
+    first, second = _pair(value)
+    return int(first), int(second)

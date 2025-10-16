@@ -1,10 +1,14 @@
+import pytest
 import torch
-from hypothesis import given, strategies as st
 
 from mfcl.losses.ntxent import NTXentLoss
 from mfcl.losses.byolloss import BYOLLoss
 from mfcl.losses.simsiamloss import SimSiamLoss
 from mfcl.losses.vicregloss import VICRegLoss
+
+hypothesis = pytest.importorskip("hypothesis")
+given = hypothesis.given
+st = hypothesis.strategies
 
 
 @given(

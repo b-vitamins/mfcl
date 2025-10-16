@@ -17,6 +17,11 @@ class DummyMethod(torch.nn.Module):
         loss = self.net(x).mean()
         return {"loss": loss}
 
+    def on_optimizer_step(self) -> None:
+        """Hook required by the Trainer protocol."""
+        # Tests rely on this method existing; the implementation is a no-op.
+        return None
+
 
 class RecordingHook(Hook):
     def __init__(self) -> None:

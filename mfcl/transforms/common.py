@@ -6,9 +6,13 @@ Gaussian kernel sizing, and small wrappers convenient for building pipelines.
 
 from __future__ import annotations
 
-from typing import Callable, Tuple
+from typing import TYPE_CHECKING, Callable, Tuple
 
 from torchvision import transforms as T
+
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 
 def normalize_stats() -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:

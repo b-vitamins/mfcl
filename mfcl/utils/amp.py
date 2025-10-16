@@ -36,7 +36,7 @@ class AmpScaler:
             enabled = torch.cuda.is_available()
         self._enabled = bool(enabled)
         # Prefer torch.amp API (device-aware); fall back to cuda.amp for older versions
-        self._scaler = None
+        self._scaler: Any | None = None
         if self._enabled:
             try:
                 self._scaler = torch.amp.GradScaler("cuda", init_scale=init_scale)  # type: ignore[attr-defined]

@@ -45,6 +45,7 @@ class AugConfig:
     blur_prob: float = 0.5
     gray_prob: float = 0.2
     solarize_prob: float = 0.0
+    solarize_threshold: int = 128
 
 
 @dataclass

@@ -1,4 +1,6 @@
+from collections.abc import Sized
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -36,6 +38,7 @@ def test_build_imagenet_datasets_imagefolder(tmp_path: Path):
         return {"view1": img, "view2": img}
 
     train_ds, val_ds = build_imagenet_datasets(str(tmp_path), None, None, tf, tf)
-    assert len(train_ds) > 0
+    sized_train = cast(Sized, train_ds)
+    assert len(sized_train) > 0
     x, idx = train_ds[0]
     assert set(x.keys()) == {"view1", "view2"}

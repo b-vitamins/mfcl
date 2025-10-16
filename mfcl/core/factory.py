@@ -329,7 +329,7 @@ def build_loss(cfg: Config) -> nn.Module:
                 # Prefer 2-arg signature; fallback to 4-arg if needed.
                 try:
                     out = loss(zeros, zeros)  # common signature
-                except TypeError as te:
+                except TypeError:
                     # Attempt 4-arg variant used by some SimSiam/BYOL implementations.
                     try:
                         out = loss(zeros, zeros, zeros, zeros)

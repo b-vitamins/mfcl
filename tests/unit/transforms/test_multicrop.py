@@ -53,8 +53,10 @@ def test_multicrop_handles_zero_local_crops(toy_image_rgb):
     out = tf(toy_image_rgb(128))
     assert out["code_crops"] == (0, 1)
     assert len(out["crops"]) == 2
+    closure = tf.__closure__
+    assert closure is not None and len(closure) >= 3
     # Local chain should be absent in closure
-    assert tf.__closure__[2].cell_contents is None
+    assert closure[2].cell_contents is None
 
 
 def test_multicrop_uses_solarize_threshold():
@@ -70,8 +72,10 @@ def test_multicrop_uses_solarize_threshold():
     )
     cfg.solarize_threshold = 21
     tf = build_multicrop_transforms(cfg)
-    g_chain = tf.__closure__[1].cell_contents
-    l_chain = tf.__closure__[2].cell_contents
+    closure = tf.__closure__
+    assert closure is not None and len(closure) >= 3
+    g_chain = closure[1].cell_contents
+    l_chain = closure[2].cell_contents
     g_solar = _find_solarize_in_compose(g_chain)
     l_solar = _find_solarize_in_compose(l_chain)
     assert g_solar and g_solar[0].threshold == 21
