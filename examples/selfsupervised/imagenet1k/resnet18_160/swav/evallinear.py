@@ -11,11 +11,18 @@ from mfcl.transforms.common import to_tensor_and_norm
 from mfcl.core.factory import build_encoder
 from mfcl.core.config import from_omegaconf, Config
 from mfcl.utils.dist import is_main_process
-from torchvision import datasets
+from torchvision import datasets, transforms as T
 
 
 def _extract_encoder_state(method_state: dict) -> dict:
-    prefixes = ["encoder_q.", "encoder_online.", "f_q.", "encoder."]
+    prefixes = [
+        "encoder_q.",
+        "encoder_online.",
+        "f_q.",
+        "encoder.",
+        "module.encoder.",
+        "module.encoder_q.",
+    ]
     for p in prefixes:
         keys = [k for k in method_state.keys() if k.startswith(p)]
         if keys:
@@ -23,20 +30,28 @@ def _extract_encoder_state(method_state: dict) -> dict:
     return method_state
 
 
+def _build_eval_transform(img_size: int):
+    scale = int(round(img_size / 0.875))
+    return T.Compose([T.Resize(scale), T.CenterCrop(img_size), to_tensor_and_norm()])
+
+
 def _build_eval_loaders(cfg: Config):
-    tfm = to_tensor_and_norm()
+    img_size = getattr(cfg.aug, "img_size", 224)
+    tfm = _build_eval_transform(img_size)
     tr = os.path.join(cfg.data.root, "train")
     vr = os.path.join(cfg.data.root, "val")
     if not (os.path.isdir(tr) and os.path.isdir(vr)):
         raise FileNotFoundError("Expected ImageNet train/val under data.root")
     tds = datasets.ImageFolder(tr, transform=tfm)
     vds = datasets.ImageFolder(vr, transform=tfm)
+    num_classes = len(tds.classes)
     tloader = DataLoader(
         tds,
         batch_size=cfg.data.batch_size,
         shuffle=True,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers,
     )
     vloader = DataLoader(
         vds,
@@ -44,8 +59,9 @@ def _build_eval_loaders(cfg: Config):
         shuffle=False,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers,
     )
-    return tloader, vloader
+    return tloader, vloader, num_classes
 
 
 def main(cfg: Any) -> None:
@@ -68,9 +84,12 @@ def main(cfg: Any) -> None:
     enc_state = _extract_encoder_state(method_state)
     encoder.load_state_dict(enc_state, strict=False)
     encoder.eval().requires_grad_(False).to(device)
-    tl, vl = _build_eval_loaders(conf)
+    tl, vl, num_classes = _build_eval_loaders(conf)
     probe = LinearProbe(
-        encoder, feature_dim=conf.model.encoder_dim, num_classes=1000, device=device
+        encoder,
+        feature_dim=conf.model.encoder_dim,
+        num_classes=num_classes,
+        device=device,
     )
     metrics = probe.fit(tl, vl)
     if is_main_process():
