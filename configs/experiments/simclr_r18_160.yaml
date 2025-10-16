@@ -1,4 +1,3 @@
-# Compose a ready-to-run SimCLR baseline.
 defaults:
   - override /data: imagenet1k
   - override /aug: simclr
@@ -9,14 +8,12 @@ defaults:
   - override /train: base
   - train/schedule
 
-# Optional per-experiment tweaks:
 data:
   batch_size: 256
 
 optim:
-  lr: 0.5    # if scaling with batch_size by hand
+  lr: 0.5
 
 train:
   epochs: 200
   warmup_epochs: 5
-
