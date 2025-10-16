@@ -37,15 +37,26 @@ class KNNHook(Hook):
         self.t = float(temperature)
         self.every = int(every)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._calls = 0
+        self._call_count = 0
+        self._last_epoch_run: int | None = None
 
     @torch.no_grad()
     def on_eval_end(self, metrics):
         if not is_main_process():
             return
-        self._calls += 1
-        if (self._calls % self.every) != 0:
-            return
+        epoch = 0
+        if isinstance(metrics, dict):
+            epoch = int(metrics.get("epoch", 0) or 0)
+        if epoch > 0:
+            if (epoch % self.every) != 0:
+                return
+            if self._last_epoch_run == epoch:
+                return
+            self._last_epoch_run = epoch
+        else:
+            self._call_count += 1
+            if (self._call_count % self.every) != 0:
+                return
         enc = self.encoder_getter()
         enc.eval().to(self._device)
         bank_feats, bank_labels, batch_sizes = [], [], []
@@ -54,8 +65,8 @@ class KNNHook(Hook):
             targets = targets.to(self._device, non_blocking=True)
             feats = enc(images)
             feats = torch.nn.functional.normalize(feats, dim=1)
-            bank_feats.append(feats)
-            bank_labels.append(targets)
+            bank_feats.append(feats.detach().to("cpu"))
+            bank_labels.append(targets.detach().to("cpu"))
             batch_sizes.append(feats.size(0))
         bank_feats = torch.cat(bank_feats, dim=0)
         bank_labels = torch.cat(bank_labels, dim=0)
