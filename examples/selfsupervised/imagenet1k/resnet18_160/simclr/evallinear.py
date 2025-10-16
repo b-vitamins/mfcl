@@ -12,7 +12,7 @@ from mfcl.core.factory import build_encoder
 from mfcl.core.config import from_omegaconf, Config
 from mfcl.utils.dist import is_main_process
 
-from torchvision import datasets
+from torchvision import datasets, transforms as T
 
 
 def _extract_encoder_state(method_state: dict) -> dict:
@@ -22,6 +22,8 @@ def _extract_encoder_state(method_state: dict) -> dict:
         "encoder_online.",
         "f_q.",
         "encoder.",
+        "module.encoder.",
+        "module.encoder_q.",
     ]
     for p in prefixes:
         keys = [k for k in method_state.keys() if k.startswith(p)]
@@ -31,14 +33,21 @@ def _extract_encoder_state(method_state: dict) -> dict:
     return method_state
 
 
+def _build_eval_transform(img_size: int):
+    scale = int(round(img_size / 0.875))
+    return T.Compose([T.Resize(scale), T.CenterCrop(img_size), to_tensor_and_norm()])
+
+
 def _build_eval_loaders(cfg: Config):
-    tfm = to_tensor_and_norm()
+    img_size = getattr(cfg.aug, "img_size", 224)
+    tfm = _build_eval_transform(img_size)
     train_root = os.path.join(cfg.data.root, "train")
     val_root = os.path.join(cfg.data.root, "val")
     if not (os.path.isdir(train_root) and os.path.isdir(val_root)):
         raise FileNotFoundError("Expected ImageNet train/val folders under data.root")
     train_ds = datasets.ImageFolder(train_root, transform=tfm)
     val_ds = datasets.ImageFolder(val_root, transform=tfm)
+    num_classes = len(train_ds.classes)
     tloader = DataLoader(
         train_ds,
         batch_size=cfg.data.batch_size,
@@ -65,7 +74,7 @@ def _build_eval_loaders(cfg: Config):
             torch.tensor([x[1] for x in b], dtype=torch.long),
         ),
     )
-    return tloader, vloader
+    return tloader, vloader, num_classes
 
 
 def main(cfg: Any) -> None:
@@ -96,10 +105,13 @@ def main(cfg: Any) -> None:
     encoder.to(device)
 
     # Data
-    train_loader, val_loader = _build_eval_loaders(conf)
+    train_loader, val_loader, num_classes = _build_eval_loaders(conf)
 
     probe = LinearProbe(
-        encoder, feature_dim=conf.model.encoder_dim, num_classes=1000, device=device
+        encoder,
+        feature_dim=conf.model.encoder_dim,
+        num_classes=num_classes,
+        device=device,
     )
     metrics = probe.fit(train_loader, val_loader)
     if is_main_process():

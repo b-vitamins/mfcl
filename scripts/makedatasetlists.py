@@ -36,15 +36,23 @@ def main():
     )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--exts", nargs="+", default=[".jpeg", ".jpg", ".png"])
+    ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
+    if not root.exists() or not root.is_dir():
+        raise FileNotFoundError(f"root not found: {root}")
     outdir = Path(args.outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
     splits = [args.split] if args.split != "both" else ["train", "val"]
     for split in splits:
-        files = _scan_split(root, split, set(e.lower() for e in args.exts))
+        split_dir = root / split
+        if not split_dir.exists():
+            print(f"[{split}] warning: split directory not found at {split_dir}")
+            files = []
+        else:
+            files = _scan_split(root, split, set(e.lower() for e in args.exts))
         files = sorted(files)
         if args.shuffle:
             random.seed(args.seed)
@@ -57,7 +65,7 @@ def main():
         with open(outp, "w") as f:
             f.write("\n".join(lines))
         print(f"[{split}] count={len(files)} -> {outp}")
-        if len(lines) > 0:
+        if args.verbose and len(lines) > 0:
             print(" first3:", lines[:3])
             print(" last3:", lines[-3:])
 

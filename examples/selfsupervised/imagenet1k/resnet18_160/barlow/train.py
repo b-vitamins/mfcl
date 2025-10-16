@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from mfcl.core.factory import build_data, build_method, build_optimizer, build_sched
-from mfcl.core.config import validate
+from mfcl.core.config import from_omegaconf, validate, Config
 from mfcl.utils.seed import set_seed
 from mfcl.engines.trainer import Trainer
 from mfcl.utils.consolemonitor import ConsoleMonitor
@@ -34,11 +34,14 @@ class KNNHook(Hook):
         self.t = float(temperature)
         self.every = int(every)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._calls = 0
 
     @torch.no_grad()
     def on_eval_end(self, metrics):
-        epoch = metrics.get("epoch", 0)
-        if (epoch % self.every) != 0:
+        if not is_main_process():
+            return
+        self._calls += 1
+        if (self._calls % self.every) != 0:
             return
         enc = self.encoder_getter()
         enc.eval().to(self._device)
@@ -67,7 +70,7 @@ class KNNHook(Hook):
         metrics["knn_top1"] = float(100.0 * top1_sum / max(1, count))
 
 
-def _build_eval_loader(cfg: DictConfig) -> DataLoader | None:
+def _build_eval_loader(cfg: Config) -> DataLoader | None:
     val_root = os.path.join(cfg.data.root, "val")
     if not os.path.isdir(val_root):
         return None
@@ -79,21 +82,23 @@ def _build_eval_loader(cfg: DictConfig) -> DataLoader | None:
         shuffle=False,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers,
     )
     return loader
 
 
 def main(cfg: Any) -> None:
     init_distributed()
-    validate(cfg)
-    set_seed(cfg.train.seed, deterministic=True)
+    conf: Config = from_omegaconf(cfg)
+    validate(conf)
+    set_seed(conf.train.seed, deterministic=True)
 
-    train_loader, _ = build_data(cfg)
-    eval_loader = _build_eval_loader(cfg)
+    train_loader, _ = build_data(conf)
+    eval_loader = _build_eval_loader(conf)
 
-    method = build_method(cfg)
-    optimizer = build_optimizer(cfg, method)
-    scheduler = build_sched(cfg, optimizer)
+    method = build_method(conf)
+    optimizer = build_optimizer(conf, method)
+    scheduler = build_sched(conf, optimizer)
 
     console = ConsoleMonitor()
     hooks = HookList()
@@ -111,8 +116,8 @@ def main(cfg: Any) -> None:
         )
 
     resume = os.environ.get("MFCL_RESUME", None)
-    if resume is None and os.path.isdir(cfg.train.save_dir):
-        cand = os.path.join(cfg.train.save_dir, "latest.pt")
+    if resume is None and os.path.isdir(conf.train.save_dir):
+        cand = os.path.join(conf.train.save_dir, "latest.pt")
         if os.path.exists(cand):
             resume = cand
 
@@ -123,24 +128,24 @@ def main(cfg: Any) -> None:
         console=console,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         hooks=hooks,
-        save_dir=cfg.train.save_dir,
+        save_dir=conf.train.save_dir,
         keep_k=3,
-        log_interval=cfg.train.log_interval,
+        log_interval=conf.train.log_interval,
         accum_steps=1,
-        clip_grad=cfg.train.grad_clip if cfg.train.grad_clip is not None else None,
-        scheduler_step_on=cfg.train.scheduler_step_on,
+        clip_grad=conf.train.grad_clip if conf.train.grad_clip is not None else None,
+        scheduler_step_on=conf.train.scheduler_step_on,
     )
     trainer.fit(
         train_loader,
         val_loader=None,
-        epochs=cfg.train.epochs,
+        epochs=conf.train.epochs,
         resume_path=resume,
         eval_every=1,
         save_every=1,
     )
 
     if is_main_process():
-        print("[done] epoch=%d save_dir=%s" % (cfg.train.epochs, cfg.train.save_dir))
+        print("[done] epoch=%d save_dir=%s" % (conf.train.epochs, conf.train.save_dir))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ from omegaconf import OmegaConf
 from mfcl.core.factory import build_method
 from mfcl.core.config import from_omegaconf, Config
 from mfcl.utils.amp import AmpScaler
-from mfcl.transforms.common import normalize_stats
 
 
 def _make_cfg(encoder: str, method: str, img: int, batch: int):
@@ -87,24 +86,21 @@ def _make_cfg(encoder: str, method: str, img: int, batch: int):
 
 def _make_synthetic_batch(method: str, batch: int, img: int) -> Tuple[dict, int]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    mean, std = normalize_stats()
 
-    def rnd(h):
-        x = torch.randn(batch, 3, h, h, device=device, dtype=torch.float32)
-        # approximate normalization
-        for c in range(3):
-            x[:, c].mul_(std[c]).add_(mean[c])
-        return x
+    def rnd(h: int) -> torch.Tensor:
+        return torch.randn(batch, 3, h, h, device=device, dtype=torch.float32)
 
     if method == "swav":
         crops = [rnd(img) for _ in range(2)] + [rnd(96) for _ in range(4)]
-        return {"crops": crops, "code_crops": (0, 1)}, 6 * batch
+        imgs_per_step = sum(c.size(0) for c in crops)
+        return {"crops": crops, "code_crops": (0, 1)}, imgs_per_step
     else:
-        return {
+        batch_dict = {
             "view1": rnd(img),
             "view2": rnd(img),
             "index": torch.arange(batch, device=device),
-        }, 2 * batch
+        }
+        return batch_dict, 2 * batch
 
 
 def main():
@@ -116,16 +112,21 @@ def main():
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=20)
+    ap.add_argument("--cudnn-benchmark", action="store_true")
     args = ap.parse_args()
 
     cfg = _make_cfg(args.encoder, args.method, args.img, args.batch)
     tcfg: Config = from_omegaconf(cfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     method = build_method(tcfg).to(device)
+    method.train()
     opt = torch.optim.SGD(method.parameters(), lr=0.1, momentum=0.9)
     scaler = AmpScaler(enabled=args.amp)
 
     batch_dict, imgs_per_step = _make_synthetic_batch(args.method, args.batch, args.img)
+
+    if args.cudnn_benchmark and torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
 
     # Warmup
     for i in range(args.warmup):
@@ -137,9 +138,13 @@ def main():
         scaler.unscale_(opt)
         scaler.step(opt)
         scaler.update()
+        if hasattr(method, "on_optimizer_step"):
+            method.on_optimizer_step()
 
     # Timed
-    torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
     t0 = time.time()
     for i in range(args.steps):
         opt.zero_grad(set_to_none=True)
@@ -150,6 +155,10 @@ def main():
         scaler.unscale_(opt)
         scaler.step(opt)
         scaler.update()
+        if hasattr(method, "on_optimizer_step"):
+            method.on_optimizer_step()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     dt = time.time() - t0
     imgs_s = imgs_per_step * args.steps / dt
     ms_step = 1000.0 * dt / args.steps
