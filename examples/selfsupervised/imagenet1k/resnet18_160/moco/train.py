@@ -90,7 +90,9 @@ def _build_eval_loader(cfg: Config) -> DataLoader | None:
         shuffle=False,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers,
+        persistent_workers=(
+            cfg.data.persistent_workers if cfg.data.num_workers > 0 else False
+        ),
     )
     return loader
 
