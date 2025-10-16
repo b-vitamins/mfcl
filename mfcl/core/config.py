@@ -128,26 +128,54 @@ def validate(cfg: Config) -> None:
     """
     if cfg.data.batch_size <= 0:
         raise ValueError("data.batch_size must be > 0")
+    if cfg.data.num_workers < 0:
+        raise ValueError("data.num_workers must be >= 0")
     if cfg.aug.img_size < 64:
         raise ValueError("aug.img_size must be >= 64")
-    if cfg.optim.lr <= 0:
-        raise ValueError("optim.lr must be > 0")
-    if cfg.train.epochs <= 0:
-        raise ValueError("train.epochs must be > 0")
+
     if cfg.model.encoder_dim <= 0:
         raise ValueError("model.encoder_dim must be > 0")
     if cfg.model.projector_out <= 0:
         raise ValueError("model.projector_out must be > 0")
+    if cfg.optim.lr <= 0:
+        raise ValueError("optim.lr must be > 0")
+    if cfg.train.epochs <= 0:
+        raise ValueError("train.epochs must be > 0")
+    if cfg.train.grad_clip is not None and cfg.train.grad_clip <= 0:
+        raise ValueError("train.grad_clip must be > 0 when set")
+
+    if hasattr(cfg.train, "scheduler_step_on"):
+        if cfg.train.scheduler_step_on not in {"batch", "epoch"}:
+            raise ValueError("train.scheduler_step_on must be 'batch' or 'epoch'")
+
+    valid_methods = {"simclr", "moco", "byol", "simsiam", "swav", "barlow", "vicreg"}
+    if cfg.method.name not in valid_methods:
+        raise ValueError("method.name must be one of simclr|moco|byol|simsiam|swav|barlow|vicreg")
+
     if cfg.method.name == "swav" and cfg.aug.global_crops < 2:
-        raise ValueError("swav requires aug.global_crops >= 2")
-    if cfg.method.name == "moco" and cfg.method.moco_queue < 1024:
-        raise ValueError("moco requires method.moco_queue >= 1024")
+        raise ValueError("aug.global_crops must be >= 2 for method.swav")
     if cfg.method.name != "swav" and cfg.aug.local_crops > 0:
-        raise ValueError("local_crops > 0 is only valid for swav")
-    if cfg.data.num_workers < 0:
-        raise ValueError("data.num_workers must be >= 0")
+        raise ValueError("aug.local_crops must be 0 unless method.swav is used")
+
+    if cfg.aug.local_crops > 0:
+        if not hasattr(cfg.aug, "local_size"):
+            raise ValueError("aug.local_size must be set when aug.local_crops > 0")
+        if cfg.aug.local_size < 64:
+            raise ValueError("aug.local_size must be >= 64 when aug.local_crops > 0")
+
     if cfg.method.name in {"simclr", "moco", "swav"} and cfg.method.temperature <= 0:
         raise ValueError("method.temperature must be > 0 for simclr/moco/swav")
+    if cfg.method.name == "moco" and cfg.method.moco_queue < 1024:
+        raise ValueError("method.moco_queue must be >= 1024 for method.moco")
+    if cfg.method.name == "barlow" and cfg.method.barlow_lambda <= 0:
+        raise ValueError("method.barlow_lambda must be > 0 for method.barlow")
+    if cfg.method.name == "vicreg":
+        if cfg.method.vicreg_lambda <= 0:
+            raise ValueError("method.vicreg_lambda must be > 0 for method.vicreg")
+        if cfg.method.vicreg_mu <= 0:
+            raise ValueError("method.vicreg_mu must be > 0 for method.vicreg")
+        if cfg.method.vicreg_nu <= 0:
+            raise ValueError("method.vicreg_nu must be > 0 for method.vicreg")
 
 
 def to_omegaconf(cfg: Config) -> Any:
