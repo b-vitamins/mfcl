@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from contextlib import nullcontext
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,22 @@ from torch.utils.data import (
 )
 
 from mfcl.metrics.knn import knn_predict
+from mfcl.utils.amp import AmpScaler
+
+
+def _autocast(enabled: bool):
+    """Return a CUDA autocast context or a no-op when disabled."""
+
+    if not enabled:
+        return nullcontext()
+    try:
+        from torch.amp import autocast as amp_autocast  # type: ignore[attr-defined]
+
+        return amp_autocast(device_type="cuda")
+    except Exception:
+        from torch.cuda.amp import autocast as cuda_autocast
+
+        return cuda_autocast()
 
 
 def _accuracy(
@@ -102,7 +119,7 @@ class LinearProbe:
         loss_meter = 0.0
         n_batches = 0
         amp_enabled = self.amp and torch.cuda.is_available()
-        scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled and self.use_scaler)
+        scaler = AmpScaler(enabled=amp_enabled and self.use_scaler)
 
         for epoch in range(1, self.epochs + 1):
             self.head.train()
@@ -110,16 +127,16 @@ class LinearProbe:
                 images = images.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
                 with torch.no_grad():
-                    with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                    with _autocast(amp_enabled):
                         feats = self.encoder(images)
                     feats = feats.detach()
                     if self.feature_norm:
                         feats = torch.nn.functional.normalize(feats, dim=1)
                 opt.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                with _autocast(amp_enabled):
                     logits = self.head(feats)
                     loss = F.cross_entropy(logits, targets)
-                if scaler.is_enabled():
+                if scaler.is_enabled:
                     scaler.scale(loss).backward()
                     scaler.step(opt)
                     scaler.update()
@@ -139,11 +156,11 @@ class LinearProbe:
             for images, targets in val_loader:
                 images = images.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
-                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                with _autocast(amp_enabled):
                     feats = self.encoder(images)
                 if self.feature_norm:
                     feats = torch.nn.functional.normalize(feats, dim=1)
-                with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                with _autocast(amp_enabled):
                     logits = self.head(feats)
                 t1, t5 = _accuracy(logits, targets, topk=(1, 5))
                 top1_sum += t1 * images.size(0)
@@ -180,7 +197,7 @@ class LinearProbe:
                 sampler_arg = sampler
                 shuffle_flag = False
 
-        kwargs: Dict[str, object] = {
+        kwargs: Dict[str, Any] = {
             "dataset": loader.dataset,
             "batch_size": override,
             "num_workers": loader.num_workers,

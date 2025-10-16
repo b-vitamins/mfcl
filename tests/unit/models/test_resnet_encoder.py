@@ -100,7 +100,9 @@ def test_resnet_two_channel_pretrained_adapt(monkeypatch):
     monkeypatch.setattr(resnet_module, "_create_tv_resnet", _fake_factory)
 
     encoder = ResNetEncoder(variant="resnet18", pretrained=True, in_channels=2)
-    adapted = encoder.backbone.conv1.weight.detach()
+    conv1 = getattr(encoder.backbone, "conv1")
+    assert isinstance(conv1, nn.Conv2d)
+    adapted = conv1.weight.detach()
     expected = original.mean(dim=1, keepdim=True).repeat(1, 2, 1, 1)
     assert adapted.shape[1] == 2
     assert torch.allclose(adapted, expected)
