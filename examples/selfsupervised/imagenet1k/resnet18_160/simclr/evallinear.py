@@ -56,10 +56,6 @@ def _build_eval_loaders(cfg: Config):
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers,
         drop_last=False,
-        collate_fn=lambda b: (
-            torch.stack([x[0] for x in b], 0),
-            torch.tensor([x[1] for x in b], dtype=torch.long),
-        ),
     )
     vloader = DataLoader(
         val_ds,
@@ -69,10 +65,6 @@ def _build_eval_loaders(cfg: Config):
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers,
         drop_last=False,
-        collate_fn=lambda b: (
-            torch.stack([x[0] for x in b], 0),
-            torch.tensor([x[1] for x in b], dtype=torch.long),
-        ),
     )
     return tloader, vloader, num_classes
 

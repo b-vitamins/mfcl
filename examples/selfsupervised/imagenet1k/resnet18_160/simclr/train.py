@@ -15,8 +15,12 @@ from mfcl.utils.dist import init_distributed, is_main_process
 
 # Optional kNN sanity-check hook
 from torchvision import datasets
+from torchvision import transforms as T
 from mfcl.transforms.common import to_tensor_and_norm
 from mfcl.metrics.knn import knn_predict
+
+if torch.cuda.is_available() and os.environ.get("MFCL_CUDNN_BENCH", "0") == "1":
+    torch.backends.cudnn.benchmark = True
 
 
 class KNNHook(Hook):
@@ -36,50 +40,67 @@ class KNNHook(Hook):
         self.t = float(temperature)
         self.every = int(every)
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._calls = 0
 
     @torch.no_grad()
     def on_eval_end(self, metrics):
-        epoch = metrics.get("epoch", None)
-        if epoch is None:
-            # If epoch not provided, run every call
-            epoch = 0
-        if (epoch % self.every) != 0:
+        if not is_main_process():
+            return
+        self._calls += 1
+        if (self._calls % self.every) != 0:
             return
         enc = self.encoder_getter()
         enc.eval().to(self._device)
-        bank_feats, bank_labels = [], []
+        bank_feats, bank_labels, batch_sizes = [], [], []
         for images, targets in self.val_loader:
             images = images.to(self._device, non_blocking=True)
             targets = targets.to(self._device, non_blocking=True)
             feats = enc(images)
             feats = torch.nn.functional.normalize(feats, dim=1)
-            bank_feats.append(feats.cpu())
-            bank_labels.append(targets.cpu())
-        bank_feats = torch.cat(bank_feats, dim=0).to(self._device)
-        bank_labels = torch.cat(bank_labels, dim=0).to(self._device)
+            bank_feats.append(feats)
+            bank_labels.append(targets)
+            batch_sizes.append(feats.size(0))
+        bank_feats = torch.cat(bank_feats, dim=0)
+        bank_labels = torch.cat(bank_labels, dim=0)
 
         # Single pass kNN over the bank
         top1_sum, count = 0.0, 0
-        for images, targets in self.val_loader:
+        start = 0
+        for (images, targets), batch_size in zip(self.val_loader, batch_sizes):
             images = images.to(self._device, non_blocking=True)
             targets = targets.to(self._device, non_blocking=True)
             feats = enc(images)
             feats = torch.nn.functional.normalize(feats, dim=1)
+            end = start + batch_size
+            mask = torch.ones(bank_feats.size(0), dtype=torch.bool, device=bank_feats.device)
+            if batch_size < mask.numel():
+                mask[start:end] = False
+            if mask.all():
+                ref_feats, ref_labels = bank_feats, bank_labels
+            else:
+                ref_feats = bank_feats[mask]
+                ref_labels = bank_labels[mask]
             probs = knn_predict(
-                feats, bank_feats, bank_labels, k=self.k, temperature=self.t
+                feats, ref_feats, ref_labels, k=self.k, temperature=self.t
             )
             _, pred = probs.topk(1, dim=1)
             top1_sum += (pred.squeeze(1) == targets).float().sum().item()
             count += images.size(0)
+            start = end
         knn_top1 = 100.0 * top1_sum / max(1, count)
         metrics["knn_top1"] = float(knn_top1)
 
 
-def _build_eval_loader(cfg: DictConfig) -> DataLoader | None:
+def _eval_transform(img_size: int) -> T.Compose:
+    size = int(round(img_size / 0.875))
+    return T.Compose([T.Resize(size), T.CenterCrop(img_size), to_tensor_and_norm()])
+
+
+def _build_eval_loader(cfg: Config) -> DataLoader | None:
     val_root = os.path.join(cfg.data.root, "val")
     if not os.path.isdir(val_root):
         return None
-    tfm = to_tensor_and_norm()
+    tfm = _eval_transform(getattr(cfg.aug, "img_size", 224))
     ds = datasets.ImageFolder(val_root, transform=tfm)
     loader = DataLoader(
         ds,
@@ -88,11 +109,6 @@ def _build_eval_loader(cfg: DictConfig) -> DataLoader | None:
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers,
-        drop_last=False,
-        collate_fn=lambda b: (
-            torch.stack([x[0] for x in b], 0),
-            torch.tensor([x[1] for x in b], dtype=torch.long),
-        ),
     )
     return loader
 
@@ -108,7 +124,7 @@ def main(cfg: DictConfig) -> None:
 
     # Data
     train_loader, _ = build_data(conf)
-    eval_loader = _build_eval_loader(cfg)
+    eval_loader = _build_eval_loader(conf)
 
     # Method/optim/sched
     method = build_method(conf)
