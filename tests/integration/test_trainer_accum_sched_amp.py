@@ -12,6 +12,9 @@ class LinearLossMethod(torch.nn.Module):
         super().__init__()
         self.w = torch.nn.Parameter(torch.tensor(1.0))
 
+    def forward(self, batch):
+        return self.step(batch)
+
     def step(self, batch):
         x = batch["x"]
         return {"loss": (self.w * x).mean()}
