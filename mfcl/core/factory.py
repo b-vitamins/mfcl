@@ -790,7 +790,9 @@ def build_optimizer(cfg: Config, model: nn.Module) -> torch.optim.Optimizer:
     raise ValueError(f"Unsupported optimizer: {cfg.optim.name}")
 
 
-def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBase]:
+def build_sched(
+    cfg: Config, opt: torch.optim.Optimizer, *, steps_per_epoch: int | None = None
+) -> Optional[SchedulerBase]:
     """Return a learning-rate scheduler with optional warmup.
 
     The trainer is responsible for stepping the returned scheduler (per epoch or
@@ -806,15 +808,38 @@ def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBa
     warmup_epochs = int(max(0, cfg.train.warmup_epochs))
     main_epochs = max(1, cfg.train.epochs - warmup_epochs)
 
+    # Decide whether to construct an epoch- or step-based schedule
+    step_on = getattr(cfg.train, "scheduler_step_on", "epoch")
+    use_batch = str(step_on).lower() == "batch"
+
+    if use_batch and (steps_per_epoch is not None) and (steps_per_epoch > 0):
+        warmup_iters = warmup_epochs * int(steps_per_epoch)
+        main_iters = max(1, main_epochs * int(steps_per_epoch))
+        if cfg.train.cosine:
+            after: Optional[SchedulerBase] = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=main_iters
+            )
+        else:
+            step_sz = max(1, int(0.67 * main_iters))
+            after = torch.optim.lr_scheduler.StepLR(opt, step_size=step_sz, gamma=0.1)
+        if warmup_iters > 0:
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                opt,
+                start_factor=1e-8,
+                end_factor=1.0,
+                total_iters=warmup_iters,
+            )
+            return torch.optim.lr_scheduler.SequentialLR(
+                opt, schedulers=[warmup, after], milestones=[warmup_iters]
+            )
+        return after
+
+    # Epoch-based schedule (default / fallback when steps_per_epoch unknown)
     if cfg.train.cosine:
-        after: Optional[SchedulerBase] = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=main_epochs
-        )
+        after = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=main_epochs)
     else:
-        # Reasonable default: one step decay at ~2/3 of post-warmup training.
         step_sz = max(1, int(0.67 * main_epochs))
         after = torch.optim.lr_scheduler.StepLR(opt, step_size=step_sz, gamma=0.1)
-
     if warmup_epochs > 0:
         warmup = torch.optim.lr_scheduler.LinearLR(
             opt,
@@ -823,11 +848,8 @@ def build_sched(cfg: Config, opt: torch.optim.Optimizer) -> Optional[SchedulerBa
             total_iters=warmup_epochs,
         )
         return torch.optim.lr_scheduler.SequentialLR(
-            opt,
-            schedulers=[warmup, after],
-            milestones=[warmup_epochs],
+            opt, schedulers=[warmup, after], milestones=[warmup_epochs]
         )
-
     return after
 
 

@@ -358,6 +358,13 @@ class Trainer:
                             raise RuntimeError("Detected NaN/Inf in gradients")
                         total_norm += float(v.norm(2).detach().item() ** 2)
             # total_norm retained for potential debugging/logging hooks.
+        # Apply optimizer step via scaler; detect if the step was skipped due to inf/NaN
+        prev_scale: float | None = None
+        if hasattr(self.scaler, "scaler") and self.scaler.scaler is not None:
+            try:
+                prev_scale = float(self.scaler.scaler.get_scale())
+            except Exception:
+                prev_scale = None
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
@@ -367,7 +374,18 @@ class Trainer:
             except Exception:
                 pass
         if self.scheduler and self.scheduler_step_on == "batch":
-            self.scheduler.step()
+            # Only step LR scheduler when the optimizer performed an update.
+            did_step = True
+            if prev_scale is not None and hasattr(self.scaler, "scaler") and self.scaler.scaler is not None:
+                try:
+                    new_scale = float(self.scaler.scaler.get_scale())
+                    # If the scale decreased, GradScaler skipped optimizer.step() due to inf/NaN.
+                    if new_scale < float(prev_scale):
+                        did_step = False
+                except Exception:
+                    did_step = True
+            if did_step:
+                self.scheduler.step()
         return self.optimizer.param_groups[0]["lr"]
 
     @staticmethod

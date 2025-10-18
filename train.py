@@ -102,7 +102,11 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     method = build_method(conf)
     optimizer = build_optimizer(conf, method)
-    scheduler = build_sched(conf, optimizer)
+    try:
+        steps_per_epoch = len(train_loader)  # type: ignore[arg-type]
+    except Exception:
+        steps_per_epoch = None
+    scheduler = build_sched(conf, optimizer, steps_per_epoch=steps_per_epoch)
 
     console = ConsoleMonitor()
     hooks = HookList()
