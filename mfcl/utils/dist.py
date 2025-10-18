@@ -15,6 +15,14 @@ import torch
 import torch.distributed as dist
 
 
+def _select_backend(default: str) -> str:
+    """Choose a backend based on CUDA availability."""
+
+    if torch.cuda.is_available():
+        return default
+    return "gloo"
+
+
 def init_distributed(backend: str = "nccl", timeout_seconds: int = 1800) -> bool:
     """Initialize torch.distributed if environment variables are present.
 
@@ -35,24 +43,33 @@ def init_distributed(backend: str = "nccl", timeout_seconds: int = 1800) -> bool
     if world <= 1:
         return False
 
+    rank = int(os.getenv("RANK", "0"))
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
-    # Select device if CUDA is available; fall back to gloo on CPU.
-    chosen_backend = backend
-    if not torch.cuda.is_available() and backend == "nccl":
-        chosen_backend = "gloo"
+    chosen_backend = _select_backend(backend)
+
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
+
+    init_method = os.getenv("DIST_INIT_METHOD", "env://")
 
     try:
         dist.init_process_group(
             backend=chosen_backend,
+            init_method=init_method,
+            rank=rank,
+            world_size=world,
             timeout=timedelta(seconds=int(timeout_seconds)),
         )
-    except Exception as e:
+    except Exception as exc:
+        if chosen_backend == "nccl" and torch.cuda.is_available():
+            raise RuntimeError(
+                "Failed to initialize NCCL process group. Ensure NCCL is installed, "
+                "CUDA_VISIBLE_DEVICES is set correctly, and MASTER_ADDR/MASTER_PORT are reachable."
+            ) from exc
         raise RuntimeError(
             f"Failed to initialize distributed process group (backend={chosen_backend})."
-        ) from e
+        ) from exc
     return True
 
 
@@ -187,6 +204,15 @@ def cleanup() -> None:
         dist.destroy_process_group()
 
 
+def unwrap_ddp(module: torch.nn.Module) -> torch.nn.Module:
+    """Return the underlying module when wrapped in DistributedDataParallel."""
+
+    ddp_cls = getattr(torch.nn.parallel, "DistributedDataParallel", None)
+    if ddp_cls is not None and isinstance(module, ddp_cls):
+        return module.module  # type: ignore[return-value]
+    return module
+
+
 __all__ = [
     "init_distributed",
     "is_dist",
@@ -199,4 +225,5 @@ __all__ = [
     "all_gather_tensor",
     "get_local_rank",
     "cleanup",
+    "unwrap_ddp",
 ]

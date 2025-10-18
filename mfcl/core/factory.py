@@ -23,6 +23,8 @@ else:  # runtime import (type not used by checker here)
 from .registry import Registry
 from .config import Config
 from mfcl.methods.base import BaseMethod
+from mfcl.utils.dist import get_rank, get_world_size
+from mfcl.data.sampler import DistSamplerWrapper
 
 
 # Public registries. Population happens explicitly near imports in this module
@@ -699,10 +701,26 @@ def build_data(
     persist_workers = cfg.data.persistent_workers and cfg.data.num_workers > 0
     # PyTorch forbids persistent_workers=True when num_workers==0.
 
+    world_size = get_world_size()
+    rank = get_rank()
+    distributed = world_size > 1
+
+    train_sampler = None
+    if distributed:
+        train_sampler = DistSamplerWrapper(
+            train_ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=cfg.data.shuffle,
+            seed=cfg.train.seed,
+            drop_last=cfg.data.drop_last,
+        )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.data.batch_size,
-        shuffle=cfg.data.shuffle,
+        shuffle=False if train_sampler is not None else cfg.data.shuffle,
+        sampler=train_sampler,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
         persistent_workers=persist_workers,
@@ -716,6 +734,7 @@ def build_data(
             val_ds,
             batch_size=cfg.data.batch_size,
             shuffle=False,
+            sampler=None,
             num_workers=cfg.data.num_workers,
             pin_memory=cfg.data.pin_memory,
             persistent_workers=persist_workers,

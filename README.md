@@ -143,6 +143,70 @@ Notes
 - You can omit `--dataset-root` if your path matches the default.
 - SwAV uses multi-crop; if it still OOMs, try `--batch-size 48` or reduce `--local-crops 1`.
 
+## Distributed training
+
+`torchrun` is the recommended launcher for both single-node multi-GPU and
+multi-node clusters. The training entrypoint auto-detects the usual environment
+variables (`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, `MASTER_ADDR`, `MASTER_PORT`),
+initializes `torch.distributed` with NCCL on CUDA builds (falling back to gloo
+when no GPUs are present), and wraps the method with `DistributedDataParallel`
+when `WORLD_SIZE > 1`. Samplers are sharded with `DistributedSampler`, their
+epoch is advanced each loop, and checkpoints/logs are kept on rank 0 only.【F:train.py†L19-L142】【F:mfcl/core/factory.py†L708-L764】【F:mfcl/engines/trainer.py†L167-L306】
+Validation loaders stay unsharded so rank 0 can run kNN monitors without
+cross-rank feature gathering.【F:mfcl/core/factory.py†L735-L764】
+
+### Single-node examples
+
+```bash
+# 8 GPUs on one host
+torchrun --standalone --nproc_per_node=8 \
+  python3 train.py --method simclr --model resnet18 --data imagenet \
+  --dataset-root /datasets/imagenet --img-size 160 --batch-size 128
+```
+
+### Multi-node via torchrun
+
+```bash
+# Node 0
+MASTER_ADDR=host0 MASTER_PORT=29500 NODE_RANK=0 WORLD_SIZE=16 \
+  torchrun --nnodes=2 --nproc_per_node=8 \
+  python3 train.py --method simclr --model resnet18 --data imagenet
+
+# Node 1
+MASTER_ADDR=host0 MASTER_PORT=29500 NODE_RANK=1 WORLD_SIZE=16 \
+  torchrun --nnodes=2 --nproc_per_node=8 \
+  python3 train.py --method simclr --model resnet18 --data imagenet
+```
+
+On Slurm clusters, launch one process per GPU and delegate rendezvous to
+`torchrun` (e.g., `srun --ntasks-per-node=8 torchrun --nproc_per_node=8 ...`).
+Set `NCCL_SOCKET_IFNAME` to your high-speed interface, and keep
+`NCCL_P2P_DISABLE=0` / `NCCL_IB_DISABLE=0` to leverage NVLink or InfiniBand.
+Enable `NCCL_DEBUG=INFO` for verbose debugging if rendezvous fails.
+
+During training each rank logs its local throughput while the summary line also
+reports a global images/sec aggregate (sum of samples divided by the slowest
+epoch).【F:mfcl/engines/trainer.py†L198-L306】 Checkpoints (`ckpt_epXXXX.pt` and
+`latest.pt`) are created by rank 0; other ranks reuse them when resuming runs.
+
+- Pass `--ddp-find-unused-parameters` if your research branch introduces
+  conditional computation that would otherwise drop gradients before the
+  reducer sees them.【F:train.py†L120-L191】
+- MoCo keeps one negative queue per rank, matching the original paper. If you
+  need a global queue, extend the method with an `all_gather` enrichment stage
+  before enqueuing.
+- Sync BatchNorm is optional; call
+  `torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)` before DDP wrapping if
+  you would like to enable it.
+
+### Scheduler stepping modes
+
+The `train.scheduler_step_on` flag controls whether LR schedulers advance per
+optimizer update (`batch`) or per epoch (`epoch`). In batch mode warmup and
+cosine schedules are constructed from the number of optimizer steps per epoch,
+so `warmup_epochs` and `epochs` translate to warmup iterations and `T_max`
+automatically.【F:mfcl/core/factory.py†L809-L855】【F:tests/unit/test_scheduler_build.py†L28-L52】
+
 ## Linear evaluation
 
 After pretraining, attach a linear probe using `eval.py`. The

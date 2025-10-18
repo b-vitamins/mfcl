@@ -16,7 +16,15 @@ from mfcl.engines.hooks import Hook, HookList
 from mfcl.engines.trainer import Trainer
 from mfcl.metrics.knn import knn_predict
 from mfcl.utils.consolemonitor import ConsoleMonitor
-from mfcl.utils.dist import init_distributed, is_main_process
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from mfcl.utils.dist import (
+    get_local_rank,
+    get_world_size,
+    init_distributed,
+    is_main_process,
+    unwrap_ddp,
+)
 from mfcl.utils.seed import set_seed
 
 
@@ -60,30 +68,52 @@ class KNNHook(Hook):
             return
         bank_feats_t = torch.cat(bank_feats, dim=0)
         bank_labels_t = torch.cat(bank_labels, dim=0)
+        total = bank_feats_t.shape[0]
         top1_sum, count = 0.0, 0
+        start = 0
         for images, targets in self.loader:
             images = images.to(self._device, non_blocking=True)
             targets = targets.to(self._device, non_blocking=True)
             feats = encoder(images)
             feats = torch.nn.functional.normalize(feats, dim=1)
+            batch = images.size(0)
+            end = min(total, start + batch)
+            before_feats = bank_feats_t[:start]
+            after_feats = bank_feats_t[end:]
+            before_labels = bank_labels_t[:start]
+            after_labels = bank_labels_t[end:]
+            if before_feats.numel() == 0 and after_feats.numel() == 0:
+                start = end
+                continue
+            if before_feats.numel() == 0:
+                ref_feats = after_feats
+                ref_labels = after_labels
+            elif after_feats.numel() == 0:
+                ref_feats = before_feats
+                ref_labels = before_labels
+            else:
+                ref_feats = torch.cat((before_feats, after_feats), dim=0)
+                ref_labels = torch.cat((before_labels, after_labels), dim=0)
             probs = knn_predict(
-                feats, bank_feats_t, bank_labels_t, k=self.k, temperature=self.temperature
+                feats, ref_feats, ref_labels, k=self.k, temperature=self.temperature
             )
             _, pred = probs.topk(1, dim=1)
             top1_sum += (pred.squeeze(1) == targets).float().sum().item()
             count += images.size(0)
+            start = end
         metrics["knn_top1"] = float(100.0 * top1_sum / max(1, count))
 
 
 def _maybe_get_encoder(method: torch.nn.Module) -> torch.nn.Module:
-    if hasattr(method, "encoder_q"):
-        return method.encoder_q
-    if hasattr(method, "f_q"):
-        return method.f_q
-    return getattr(method, "encoder", method)
+    base = unwrap_ddp(method)
+    if hasattr(base, "encoder_q"):
+        return base.encoder_q
+    if hasattr(base, "f_q"):
+        return base.f_q
+    return getattr(base, "encoder", base)
 
 
-_CLI_FLAGS: dict[str, bool] = {"print_config": False}
+_CLI_FLAGS: dict[str, bool] = {"print_config": False, "ddp_find_unused": False}
 
 
 @hydra.main(config_path="configs", config_name="config", version_base="1.3")
@@ -100,7 +130,26 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     train_loader, val_loader = build_data(conf)
 
+    distributed = get_world_size() > 1
+    if torch.cuda.is_available():
+        device = torch.device("cuda", get_local_rank())
+    else:
+        device = torch.device("cpu")
+
     method = build_method(conf)
+    method = method.to(device)
+    if distributed:
+        find_unused = _CLI_FLAGS.get("ddp_find_unused", False)
+        if torch.cuda.is_available():
+            method = DDP(
+                method,
+                device_ids=[get_local_rank()],
+                output_device=get_local_rank(),
+                find_unused_parameters=find_unused,
+            )
+        else:
+            method = DDP(method, find_unused_parameters=find_unused)
+
     optimizer = build_optimizer(conf, method)
     try:
         steps_per_epoch = len(train_loader)  # type: ignore[arg-type]
@@ -122,8 +171,6 @@ def _hydra_entry(cfg: DictConfig) -> None:
                 every_n_epochs=int(knn_cfg.get("every_n_epochs", 10)),
             )
         )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     resume = os.environ.get("MFCL_RESUME", None)
     save_dir = conf.train.save_dir
@@ -336,6 +383,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the resolved Hydra config before training.",
     )
+    parser.add_argument(
+        "--ddp-find-unused-parameters",
+        dest="ddp_find_unused",
+        action="store_true",
+        help="Enable DistributedDataParallel(find_unused_parameters=True) for dynamic graphs.",
+    )
     return parser
 
 
@@ -350,6 +403,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.cudnn_bench:
         os.environ["MFCL_CUDNN_BENCH"] = "1"
     _CLI_FLAGS["print_config"] = bool(args.print_config)
+    _CLI_FLAGS["ddp_find_unused"] = bool(getattr(args, "ddp_find_unused", False))
 
     argv_backup = sys.argv
     try:

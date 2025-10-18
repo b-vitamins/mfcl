@@ -12,6 +12,7 @@ else:
     from torch.optim.lr_scheduler import _LRScheduler as SchedulerBase  # type: ignore
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
@@ -21,7 +22,13 @@ from collections.abc import Iterable as _CIterable
 from mfcl.utils.amp import AmpScaler
 from mfcl.utils.checkpoint import save_checkpoint, load_checkpoint
 from mfcl.utils.consolemonitor import ConsoleMonitor
-from mfcl.utils.dist import is_main_process, reduce_dict, barrier, get_world_size
+from mfcl.utils.dist import (
+    barrier,
+    get_world_size,
+    is_main_process,
+    reduce_dict,
+    unwrap_ddp,
+)
 from mfcl.metrics.meter import SmoothedValue
 
 
@@ -31,6 +38,7 @@ class _TrainableMethod(Protocol):
     def parameters(self) -> _CIterable[nn.Parameter]: ...
     def state_dict(self) -> Dict[str, Any]: ...
     def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = ...) -> Any: ...
+    def __call__(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def step(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def on_optimizer_step(self) -> None: ...
 
@@ -74,6 +82,7 @@ class Trainer:
             guard_grad_nan: If True, raise when gradients contain NaN or Inf.
         """
         self.method: _TrainableMethod = method
+        self._method_impl = unwrap_ddp(method)
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.console = console or ConsoleMonitor()
@@ -96,7 +105,7 @@ class Trainer:
         self.scheduler_step_on = scheduler_step_on
         self.guard_grad_nan = bool(guard_grad_nan)
 
-        self.method.to(self.device)
+        unwrap_ddp(self.method).to(self.device)
         # Global step counts processed micro-batches across the lifetime of the trainer
         self._global_step = 0
 
@@ -128,7 +137,7 @@ class Trainer:
 
         self.method.train()
         try:
-            fn: Any = getattr(self.method, "on_train_start", None)
+            fn: Any = getattr(self._method_impl, "on_train_start", None)
             if callable(fn):
                 fn()
         except Exception:
@@ -210,11 +219,24 @@ class Trainer:
         if is_main_process():
             self.console.epoch_start(epoch, total)
 
+        sampler = getattr(loader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            try:
+                sampler.set_epoch(epoch)
+            except Exception:
+                pass
+        batch_sampler = getattr(loader, "batch_sampler", None)
+        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+            try:
+                batch_sampler.set_epoch(epoch)
+            except Exception:
+                pass
+
         for step, batch in enumerate(loader):
             batch = self.to_device(batch)
             step_start = time.time()
             with self.scaler.autocast():
-                stats = self.method.step(batch)
+                stats = self.method(batch)
                 if "loss" not in stats:
                     raise KeyError("Method step() must return dict with key 'loss'")
                 loss = stats["loss"]
@@ -310,6 +332,23 @@ class Trainer:
             reduce_map = reduce_dict(reduce_map, op="sum")  # type: ignore[assignment]
         epoch_loss = (reduce_map["sum_loss"] / (reduce_map["count"] + 1e-12)).item()
 
+        global_samples = float(samples_seen)
+        global_epoch_time = float(epoch_time)
+        if get_world_size() > 1 and dist.is_available() and dist.is_initialized():
+            try:
+                samples_tensor = torch.tensor(
+                    global_samples, device=self.device, dtype=torch.float64
+                )
+                time_tensor = torch.tensor(
+                    global_epoch_time, device=self.device, dtype=torch.float64
+                )
+                dist.all_reduce(samples_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(time_tensor, op=dist.ReduceOp.MAX)
+                global_samples = float(samples_tensor.item())
+                global_epoch_time = float(time_tensor.item())
+            except Exception:
+                pass
+
         if is_main_process():
             self.console.newline()
             summary_metrics = {
@@ -319,6 +358,8 @@ class Trainer:
             }
             if epoch_time > 0 and samples_seen > 0:
                 summary_metrics["imgs_per_sec"] = samples_seen / epoch_time
+            if global_epoch_time > 0 and global_samples > 0:
+                summary_metrics["global_imgs_per_sec"] = global_samples / global_epoch_time
             self.console.summary(epoch, summary_metrics)
 
         return {
@@ -326,6 +367,9 @@ class Trainer:
             "lr": float(last_lr),
             "time_per_batch": float(time_meter.global_avg),
             "imgs_per_sec": float(samples_seen / epoch_time) if epoch_time > 0 else 0.0,
+            "global_imgs_per_sec": float(global_samples / global_epoch_time)
+            if global_epoch_time > 0
+            else 0.0,
         }
 
     def _apply_optimizer_step(self, micro_batches_in_step: int) -> float:
@@ -368,9 +412,10 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-        if hasattr(self.method, "on_optimizer_step"):
+        method_impl = self._method_impl
+        if hasattr(method_impl, "on_optimizer_step"):
             try:
-                self.method.on_optimizer_step()
+                method_impl.on_optimizer_step()
             except Exception:
                 pass
         if self.scheduler and self.scheduler_step_on == "batch":
