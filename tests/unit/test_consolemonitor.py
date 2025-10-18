@@ -9,4 +9,6 @@ def test_consolemonitor_live_and_summary(capsys):
     c.newline()
     c.summary(1, {"loss": 1.0, "lr": 0.1})
     out = capsys.readouterr().out
-    assert "[epoch" in out and "loss=" in out
+    assert "[Epoch 001]" in out
+    assert "Loss = 1.0000" in out
+    assert "LR = 1.00e-1" in out

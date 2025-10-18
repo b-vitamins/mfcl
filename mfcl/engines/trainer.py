@@ -49,7 +49,7 @@ class Trainer:
         hooks: Optional[Hook | HookList] = None,
         save_dir: Optional[str] = None,
         keep_k: int = 3,
-        log_interval: int = 50,
+        log_interval: int = 1,
         accum_steps: int = 1,
         clip_grad: Optional[float] = None,
         scheduler_step_on: str = "batch",
@@ -97,8 +97,6 @@ class Trainer:
         self.guard_grad_nan = bool(guard_grad_nan)
 
         self.method.to(self.device)
-        # Track micro-batches between optimizer steps for accumulation-invariant scheduling
-        self._sched_micro_batches = 0
         # Global step counts processed micro-batches across the lifetime of the trainer
         self._global_step = 0
 
@@ -201,7 +199,6 @@ class Trainer:
         total = len(loader) if isinstance(loader, _Sized) else 0
         last_lr = self.optimizer.param_groups[0]["lr"]
         self.optimizer.zero_grad(set_to_none=True)
-        self._sched_micro_batches = 0
         # t0 = time.time()
 
         # Running sums for epoch-level reduction
@@ -211,8 +208,7 @@ class Trainer:
         epoch_time = 0.0
 
         if is_main_process():
-            header = ("step", "loss", "lr", "ips", "eta")
-            self.console.epoch_start(epoch, total, header=header)
+            self.console.epoch_start(epoch, total)
 
         for step, batch in enumerate(loader):
             batch = self.to_device(batch)
@@ -239,8 +235,6 @@ class Trainer:
             count += 1
 
             do_step = ((step + 1) % self.accum_steps) == 0
-            if self.scheduler and self.scheduler_step_on == "batch":
-                self._sched_micro_batches += 1
             if do_step:
                 last_lr = self._apply_optimizer_step(self.accum_steps)
 
@@ -287,7 +281,19 @@ class Trainer:
                             metrics[k] = float(v.detach().to(torch.float32).item())
                         except Exception:
                             continue
-                self.console.live(epoch, step + 1, total, metrics)
+                self.console.live(
+                    epoch,
+                    step + 1,
+                    total,
+                    metrics,
+                    metric_order=(
+                        "loss",
+                        "lr",
+                        "ips",
+                        "pos_sim",
+                        "neg_sim_mean",
+                    ),
+                )
 
         # Flush gradients if the final micro-batch count does not evenly divide the
         # accumulation factor. Without this step, the trailing micro-batches would
@@ -361,13 +367,7 @@ class Trainer:
             except Exception:
                 pass
         if self.scheduler and self.scheduler_step_on == "batch":
-            # Step scheduler once per micro-batch since the last optimizer step to
-            # emulate "per-batch" schedules under gradient accumulation.
-            steps = int(self._sched_micro_batches)
-            if steps > 0:
-                for _ in range(steps):
-                    self.scheduler.step()
-            self._sched_micro_batches = 0
+            self.scheduler.step()
         return self.optimizer.param_groups[0]["lr"]
 
     @staticmethod

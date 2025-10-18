@@ -70,7 +70,7 @@ def _make_cfg(encoder: str, method: str, img: int, batch: int):
         "grad_clip": None,
         "save_dir": "runs/bench",
         "seed": 42,
-        "log_interval": 50,
+        "log_interval": 1,
         "scheduler_step_on": "batch",
     }
     cfg = {

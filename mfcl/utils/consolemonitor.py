@@ -12,6 +12,24 @@ import shutil
 from typing import Dict, Sequence
 
 
+_DISPLAY_NAMES: Dict[str, str] = {
+    "loss": "Loss",
+    "lr": "LR",
+    "learning_rate": "LR",
+    "ips": "IPS",
+    "imgs_per_sec": "IPS",
+    "images_per_sec": "IPS",
+    "pos_sim": "Sim(pos)",
+    "neg_sim_mean": "Avg. Sim(neg)",
+    "cos_sim": "Cos Sim",
+    "diag_mean": "Diag Mean",
+    "offdiag_mean": "Off-Diag Mean",
+    "mse": "MSE",
+    "std_mean": "Std Mean",
+    "cov_offdiag": "Cov Off-Diag",
+}
+
+
 class ConsoleMonitor:
     """Single-line monitor with epoch summaries and ETA."""
 
@@ -61,11 +79,26 @@ class ConsoleMonitor:
         self.reset_epoch_timer()
 
     @staticmethod
+    def _display_name(name: str) -> str:
+        label = _DISPLAY_NAMES.get(name)
+        if label is not None:
+            return label
+        return name.replace("_", " ").title()
+
+    @staticmethod
+    def _fmt_lr(value: float) -> str:
+        formatted = f"{float(value):.2e}"
+        mantissa, exponent = formatted.split("e")
+        sign = "-" if exponent.startswith("-") else ""
+        digits = exponent.lstrip("+-0") or "0"
+        return f"{mantissa}e{sign}{digits}"
+
+    @staticmethod
     def _fmt_metric(name: str, value: float) -> str:
         """Format metrics with human-friendly precision based on their name."""
 
         if name in {"lr", "learning_rate"}:
-            return f"{float(value):.6f}"
+            return ConsoleMonitor._fmt_lr(value)
         if name in {"ips", "imgs_per_sec", "images_per_sec"}:
             return f"{float(value):.1f}"
         if "time" in name:
@@ -106,7 +139,11 @@ class ConsoleMonitor:
             remaining = max(0, total - step)
             eta = self._ema_step * remaining
 
-        parts = [f"ep {epoch:03d} [{step:05d}/{total:05d}]"]
+        if total > 0:
+            progress = f"[{step:05d}/{total:05d}]"
+        else:
+            progress = f"[{step:05d}/-----]"
+        parts = [f"Epoch: {epoch:03d} {progress}"]
         seen: set[str] = set()
         if metric_order is not None:
             for name in metric_order:
@@ -114,18 +151,22 @@ class ConsoleMonitor:
                     seen.add(name)
                     value = metrics[name]
                     try:
-                        parts.append(f"{name}={self._fmt_metric(name, float(value))}")
+                        parts.append(
+                            f"{self._display_name(name)} = {self._fmt_metric(name, float(value))}"
+                        )
                     except Exception:
                         continue
         for k, v in metrics.items():
             if k in seen:
                 continue
             try:
-                parts.append(f"{k}={self._fmt_metric(k, float(v))}")
+                parts.append(
+                    f"{self._display_name(k)} = {self._fmt_metric(k, float(v))}"
+                )
             except Exception:
                 # Skip non-floaty values
                 continue
-        parts.append(f"eta={self._fmt_eta(eta)}")
+        parts.append(f"ETA = {self._fmt_eta(eta)}")
         msg = " ".join(parts)
 
         # Respect terminal width; truncate if needed.
@@ -161,7 +202,7 @@ class ConsoleMonitor:
             metrics: Mapping of metric name to scalar float.
             metric_order: Optional explicit ordering for metrics when displaying.
         """
-        parts = [f"[epoch {epoch:03d}]"]
+        parts = [f"[Epoch {epoch:03d}]"]
         seen: set[str] = set()
         if metric_order is not None:
             for name in metric_order:
@@ -169,14 +210,18 @@ class ConsoleMonitor:
                     seen.add(name)
                     value = metrics[name]
                     try:
-                        parts.append(f"{name}={self._fmt_metric(name, float(value))}")
+                        parts.append(
+                            f"{self._display_name(name)} = {self._fmt_metric(name, float(value))}"
+                        )
                     except Exception:
                         continue
         for k, v in metrics.items():
             if k in seen:
                 continue
             try:
-                parts.append(f"{k}={self._fmt_metric(k, float(v))}")
+                parts.append(
+                    f"{self._display_name(k)} = {self._fmt_metric(k, float(v))}"
+                )
             except Exception:
                 continue
         msg = " ".join(parts)

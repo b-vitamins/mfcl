@@ -104,7 +104,7 @@ class TrainConfig:
     grad_clip: float | None = None
     save_dir: str = "runs/simclr_r18_160"
     seed: int = 42
-    log_interval: int = 50  # batches
+    log_interval: int = 1  # batches
     # Reserved for trainer control; factory is agnostic to step granularity.
     scheduler_step_on: str = "epoch"
 
