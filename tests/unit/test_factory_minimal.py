@@ -103,6 +103,47 @@ def test_factory_is_case_insensitive(monkeypatch, method_name, expect_predictor,
 
     # The original casing should remain untouched to avoid side effects.
     assert cfg.method.name == method_name
+
+
+def test_moco_syncbn_conversion(monkeypatch):
+    class BNEncoder(torch.nn.Module):
+        def __init__(self, dim: int) -> None:
+            super().__init__()
+            self.linear = torch.nn.Linear(dim, dim)
+            self.bn = torch.nn.BatchNorm1d(dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.bn(self.linear(x))
+
+    def _build_encoder(cfg: Config) -> torch.nn.Module:
+        return BNEncoder(cfg.model.encoder_dim)
+
+    monkeypatch.setattr(F, "build_encoder", _build_encoder)
+    cfg = Config(
+        data=DataConfig(root="/tmp"),
+        aug=AugConfig(img_size=32),
+        model=ModelConfig(
+            encoder="resnet18",
+            encoder_dim=8,
+            projector_hidden=16,
+            projector_out=4,
+        ),
+        method=MethodConfig(
+            name="moco",
+            temperature=0.2,
+            moco_momentum=0.99,
+            moco_queue=32,
+            use_syncbn=True,
+        ),
+        optim=OptimConfig(),
+        train=TrainConfig(),
+    )
+    method = F.build_method(cfg)
+    assert isinstance(method, torch.nn.Module)
+    assert any(
+        isinstance(m, torch.nn.SyncBatchNorm)
+        for m in method.encoder_q.modules()
+    )
 def test_encoder_registration_bubbles_up_unexpected_errors():
     key = "mfcl.models.encoders.resnet"
     original_module = sys.modules.get(key)

@@ -25,6 +25,10 @@ class SwAV(BaseMethod):
         epsilon: float = 0.05,
         sinkhorn_iters: int = 3,
         normalize_input: bool = True,
+        use_float32_for_sinkhorn: bool = True,
+        sinkhorn_tol: float = 1e-3,
+        sinkhorn_max_iters: int = 100,
+        codes_queue_size: int = 0,
     ) -> None:
         """Construct SwAV.
 
@@ -36,15 +40,28 @@ class SwAV(BaseMethod):
             epsilon: Sinkhorn entropic regularization.
             sinkhorn_iters: Number of Sinkhorn iterations.
             normalize_input: Whether to L2-normalize projector outputs before prototypes.
+            use_float32_for_sinkhorn: Cast Sinkhorn computation to float32 for stability.
+            sinkhorn_tol: Early-stop tolerance for Sinkhorn balancing.
+            sinkhorn_max_iters: Maximum iterations for Sinkhorn refinement.
+            codes_queue_size: Optional number of past logits (rows) to retain per
+                code crop for assignment stabilization. ``0`` disables the queue.
         """
         super().__init__()
         self.encoder = encoder
         self.projector = projector
         self.prototypes = prototypes
         self.loss_fn = SwAVLoss(
-            epsilon=epsilon, sinkhorn_iters=sinkhorn_iters, temperature=temperature
+            epsilon=epsilon,
+            sinkhorn_iters=sinkhorn_iters,
+            temperature=temperature,
+            use_float32_for_sinkhorn=use_float32_for_sinkhorn,
+            sinkhorn_tol=sinkhorn_tol,
+            sinkhorn_max_iters=sinkhorn_max_iters,
         )
         self.normalize_input = normalize_input
+        self.codes_queue_size = max(int(codes_queue_size), 0)
+        self._codes_queue: Dict[int, List[torch.Tensor]] = {}
+        self._codes_queue_rows: Dict[int, int] = {}
 
     def forward_views(self, batch: Dict[str, Any]):
         crops: List[torch.Tensor] = batch["crops"]
@@ -57,13 +74,44 @@ class SwAV(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
         logits, code_idx = proj
-        loss, stats = self.loss_fn(logits, code_idx)  # type: ignore[arg-type]
+        queue_logits = self._gather_queue_logits(logits, code_idx)
+        loss, stats = self.loss_fn(logits, code_idx, queue_logits=queue_logits)  # type: ignore[arg-type]
         stats["loss"] = loss
+        self._enqueue_codes(logits, code_idx)
         return stats
 
     def on_optimizer_step(self) -> None:
         # Normalize prototype weights after each optimizer step
         self.prototypes.normalize_weights()
+
+    def _gather_queue_logits(
+        self, logits: List[torch.Tensor], code_idx: Any
+    ) -> Dict[int, torch.Tensor]:
+        if self.codes_queue_size <= 0:
+            return {}
+        gathered: Dict[int, torch.Tensor] = {}
+        for idx in code_idx:
+            stored = self._codes_queue.get(int(idx))
+            if stored:
+                tensor = torch.cat(stored, dim=0)
+                gathered[int(idx)] = tensor.to(
+                    device=logits[int(idx)].device, dtype=logits[int(idx)].dtype
+                )
+        return gathered
+
+    def _enqueue_codes(self, logits: List[torch.Tensor], code_idx: Any) -> None:
+        if self.codes_queue_size <= 0:
+            return
+        for idx in code_idx:
+            key = int(idx)
+            entry = logits[key].detach().to(torch.float32).cpu()
+            queue = self._codes_queue.setdefault(key, [])
+            queue.append(entry)
+            rows = self._codes_queue_rows.get(key, 0) + entry.shape[0]
+            while rows > self.codes_queue_size and queue:
+                removed = queue.pop(0)
+                rows -= removed.shape[0]
+            self._codes_queue_rows[key] = rows
 
 
 __all__ = ["SwAV"]

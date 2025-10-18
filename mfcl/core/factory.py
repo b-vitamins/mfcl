@@ -290,7 +290,11 @@ def build_loss(cfg: Config) -> nn.Module:
     loss_ctor = LOSS_REGISTRY.get(loss_key)
     # Instantiate with method-relevant arguments when applicable.
     if loss_key == "ntxent":
-        loss = loss_ctor(temperature=cfg.method.temperature, normalize=True)
+        loss = loss_ctor(
+            temperature=cfg.method.temperature,
+            normalize=True,
+            mode=cfg.method.ntxent_mode,
+        )
     elif loss_key == "mococontrast":
         loss = loss_ctor(temperature=cfg.method.temperature)
     elif loss_key == "swavloss":
@@ -298,6 +302,9 @@ def build_loss(cfg: Config) -> nn.Module:
             epsilon=0.05,
             sinkhorn_iters=cfg.method.swav_sinkhorn_iters,
             temperature=cfg.method.temperature,
+            use_float32_for_sinkhorn=cfg.method.swav_use_fp32_sinkhorn,
+            sinkhorn_tol=cfg.method.swav_sinkhorn_tol,
+            sinkhorn_max_iters=cfg.method.swav_sinkhorn_max_iters,
         )
     elif loss_key == "barlowtwins":
         loss = loss_ctor(lambda_offdiag=cfg.method.barlow_lambda)
@@ -410,6 +417,8 @@ def build_method(cfg: Config) -> BaseMethod:
             projector=projector,
             temperature=cfg.method.temperature,
             normalize=True,
+            ntxent_mode=cfg.method.ntxent_mode,
+            cross_rank_negatives=cfg.method.cross_rank_negatives,
         )
 
     if name == "moco":
@@ -428,6 +437,18 @@ def build_method(cfg: Config) -> BaseMethod:
             cfg.model.projector_out,
             use_bn=True,
         )
+        if cfg.method.use_syncbn and get_world_size() > 1:
+            convert = torch.nn.SyncBatchNorm.convert_sync_batchnorm
+            enc_q = convert(enc_q)
+            enc_k = convert(enc_k)
+            proj_q = convert(proj_q)
+            proj_k = convert(proj_k)
+        elif cfg.method.use_syncbn:
+            warnings.warn(
+                "method.use_syncbn requested but world_size == 1; skipping conversion.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         from mfcl.methods.moco import MoCo
 
         return MoCo(
@@ -439,6 +460,7 @@ def build_method(cfg: Config) -> BaseMethod:
             momentum=cfg.method.moco_momentum,
             queue_size=cfg.method.moco_queue,
             normalize=True,
+            cross_rank_queue=cfg.method.cross_rank_queue,
         )
 
     if name == "byol":
@@ -474,6 +496,9 @@ def build_method(cfg: Config) -> BaseMethod:
             projector_target=g_k,
             predictor=q,
             tau_base=cfg.method.byol_tau_base,
+            tau_final=cfg.method.byol_tau_final,
+            momentum_schedule=cfg.method.byol_momentum_schedule,
+            momentum_schedule_steps=cfg.method.byol_momentum_schedule_steps,
             normalize=True,
             variant="cosine",
         )
@@ -564,6 +589,10 @@ def build_method(cfg: Config) -> BaseMethod:
             epsilon=0.05,
             sinkhorn_iters=cfg.method.swav_sinkhorn_iters,
             normalize_input=True,
+            use_float32_for_sinkhorn=cfg.method.swav_use_fp32_sinkhorn,
+            sinkhorn_tol=cfg.method.swav_sinkhorn_tol,
+            sinkhorn_max_iters=cfg.method.swav_sinkhorn_max_iters,
+            codes_queue_size=cfg.method.swav_codes_queue_size,
         )
 
     raise KeyError(f"Unknown method: {cfg.method.name}")

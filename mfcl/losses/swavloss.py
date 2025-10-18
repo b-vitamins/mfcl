@@ -100,6 +100,7 @@ class SwAVLoss(nn.Module):
         self,
         logits_per_crop: List[torch.Tensor],
         code_crop_indices: Tuple[int, int],
+        queue_logits: Dict[int, torch.Tensor] | None = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Compute SwAV loss.
 
@@ -125,8 +126,19 @@ class SwAVLoss(nn.Module):
             raise ValueError("code_crop_indices out of range")
 
         # Compute codes on the two designated crops
-        Qa = self._sinkhorn(logits_per_crop[a])  # [B,K]
-        Qb = self._sinkhorn(logits_per_crop[b])  # [B,K]
+        queue_logits = queue_logits or {}
+
+        def _codes_for(idx: int) -> torch.Tensor:
+            base = logits_per_crop[idx]
+            queued = queue_logits.get(idx)
+            if queued is not None and queued.numel() > 0:
+                combined = torch.cat([queued, base.detach()], dim=0)
+                Q_full = self._sinkhorn(combined)
+                return Q_full[-B:]
+            return self._sinkhorn(base)
+
+        Qa = _codes_for(a)
+        Qb = _codes_for(b)
 
         # Stats from codes
         def entropy(Q: torch.Tensor) -> torch.Tensor:

@@ -74,8 +74,19 @@ class MethodConfig:
     moco_momentum: float = 0.999
     moco_queue: int = 65536
     byol_tau_base: float = 0.996
+    byol_tau_final: float = 0.996
+    byol_momentum_schedule: str = "const"
+    byol_momentum_schedule_steps: int | None = None
+    ntxent_mode: str = "paired"
+    use_syncbn: bool = False
+    cross_rank_negatives: bool = False
+    cross_rank_queue: bool = False
     swav_prototypes: int = 3000
     swav_sinkhorn_iters: int = 3
+    swav_sinkhorn_tol: float = 1e-3
+    swav_sinkhorn_max_iters: int = 100
+    swav_use_fp32_sinkhorn: bool = True
+    swav_codes_queue_size: int = 0
     barlow_lambda: float = 5e-3
     vicreg_lambda: float = 25.0
     vicreg_mu: float = 25.0
@@ -169,9 +180,10 @@ def validate(cfg: Config) -> None:
     if cfg.method.name not in valid_methods:
         raise ValueError("method.name must be one of simclr|moco|byol|simsiam|swav|barlow|vicreg")
 
-    if cfg.method.name == "swav" and cfg.aug.global_crops < 2:
+    method_name = cfg.method.name.lower()
+    if method_name == "swav" and cfg.aug.global_crops < 2:
         raise ValueError("aug.global_crops must be >= 2 for method.swav")
-    if cfg.method.name != "swav" and cfg.aug.local_crops > 0:
+    if method_name != "swav" and cfg.aug.local_crops > 0:
         raise ValueError("aug.local_crops must be 0 unless method.swav is used")
 
     if cfg.aug.local_crops > 0:
@@ -180,18 +192,52 @@ def validate(cfg: Config) -> None:
         if cfg.aug.local_size < 64:
             raise ValueError("aug.local_size must be >= 64 when aug.local_crops > 0")
 
-    if cfg.method.name in {"simclr", "moco", "swav"} and cfg.method.temperature <= 0:
+    ntxent_mode = getattr(cfg.method, "ntxent_mode", "paired")
+    if ntxent_mode.lower() not in {"paired", "2n", "twon"}:
+        raise ValueError("method.ntxent_mode must be 'paired' or '2N'")
+
+    if method_name in {"simclr", "moco", "swav"} and cfg.method.temperature <= 0:
         raise ValueError("method.temperature must be > 0 for simclr/moco/swav")
-    if cfg.method.name == "moco" and cfg.method.moco_queue < 1024:
+    if method_name == "moco" and cfg.method.moco_queue < 1024:
         raise ValueError("method.moco_queue must be >= 1024 for method.moco")
-    if cfg.method.name == "barlow" and cfg.method.barlow_lambda <= 0:
+    if method_name == "moco":
+        if cfg.method.cross_rank_queue not in {True, False}:
+            raise ValueError("method.cross_rank_queue must be boolean")
+        if cfg.method.use_syncbn not in {True, False}:
+            raise ValueError("method.use_syncbn must be boolean")
+    if cfg.method.cross_rank_negatives not in {True, False}:
+        raise ValueError("method.cross_rank_negatives must be boolean")
+    if cfg.method.swav_use_fp32_sinkhorn not in {True, False}:
+        raise ValueError("method.swav_use_fp32_sinkhorn must be boolean")
+
+    if cfg.method.swav_sinkhorn_tol <= 0:
+        raise ValueError("method.swav_sinkhorn_tol must be > 0")
+    if cfg.method.swav_sinkhorn_max_iters < 1:
+        raise ValueError("method.swav_sinkhorn_max_iters must be >= 1")
+    if cfg.method.swav_codes_queue_size < 0:
+        raise ValueError("method.swav_codes_queue_size must be >= 0")
+
+    tau_base = getattr(cfg.method, "byol_tau_base", 0.996)
+    tau_final = getattr(cfg.method, "byol_tau_final", tau_base)
+    if not 0.0 <= tau_base < 1.0:
+        raise ValueError("method.byol_tau_base must be in [0, 1)")
+    if not 0.0 <= tau_final < 1.0:
+        raise ValueError("method.byol_tau_final must be in [0, 1)")
+    schedule = getattr(cfg.method, "byol_momentum_schedule", "const").lower()
+    if schedule not in {"const", "cosine"}:
+        raise ValueError("method.byol_momentum_schedule must be 'const' or 'cosine'")
+    steps = cfg.method.byol_momentum_schedule_steps
+    if schedule == "cosine" and steps is not None and steps <= 0:
+        raise ValueError("method.byol_momentum_schedule_steps must be > 0 for cosine schedule")
+
+    if method_name == "barlow" and cfg.method.barlow_lambda <= 0:
         raise ValueError("method.barlow_lambda must be > 0 for method.barlow")
-    if cfg.method.name in {"byol", "simsiam"}:
+    if method_name in {"byol", "simsiam"}:
         if cfg.model.predictor_out != cfg.model.projector_out:
             raise ValueError(
                 "model.predictor_out must match model.projector_out for byol/simsiam"
             )
-    if cfg.method.name == "vicreg":
+    if method_name == "vicreg":
         if cfg.method.vicreg_lambda <= 0:
             raise ValueError("method.vicreg_lambda must be > 0 for method.vicreg")
         if cfg.method.vicreg_mu <= 0:

@@ -52,3 +52,52 @@ def test_validation_errors_reference_fields():
             "epochs",
         ]
     )
+
+
+def test_validation_rejects_invalid_ntxent_mode():
+    cfg = Config(
+        data=DataConfig(root="/tmp"),
+        aug=AugConfig(),
+        model=ModelConfig(),
+        method=MethodConfig(name="simclr", ntxent_mode="bogus"),
+        optim=OptimConfig(),
+        train=TrainConfig(),
+    )
+    with pytest.raises(ValueError):
+        validate(cfg)
+
+
+def test_validation_checks_byol_schedule_fields():
+    cfg = Config(
+        data=DataConfig(root="/tmp"),
+        aug=AugConfig(),
+        model=ModelConfig(),
+        method=MethodConfig(
+            name="byol",
+            byol_tau_base=-0.1,
+            byol_momentum_schedule="cosine",
+            byol_momentum_schedule_steps=0,
+        ),
+        optim=OptimConfig(),
+        train=TrainConfig(),
+    )
+    with pytest.raises(ValueError):
+        validate(cfg)
+
+
+def test_validation_checks_swav_queue_and_tol():
+    cfg = Config(
+        data=DataConfig(root="/tmp"),
+        aug=AugConfig(global_crops=2),
+        model=ModelConfig(),
+        method=MethodConfig(
+            name="swav",
+            swav_sinkhorn_tol=-1.0,
+            swav_sinkhorn_max_iters=0,
+            swav_codes_queue_size=-1,
+        ),
+        optim=OptimConfig(),
+        train=TrainConfig(),
+    )
+    with pytest.raises(ValueError):
+        validate(cfg)

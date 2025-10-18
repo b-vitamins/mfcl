@@ -137,6 +137,28 @@ Set `--run-dir` to keep checkpoints in a fixed directory. The trainer
 prints smoothed loss, learning-rate, throughput (`ips`), and ETA during
 training and summarizes per-epoch throughput in images/second.【F:mfcl/engines/trainer.py†L198-L288】【F:mfcl/utils/consolemonitor.py†L31-L120】
 
+### Method-specific configuration
+
+- **BYOL momentum** – `method.byol_momentum_schedule` selects between
+  `const` (default) and `cosine`. When using a schedule, set
+  `method.byol_tau_base`, `method.byol_tau_final`, and
+  `method.byol_momentum_schedule_steps` to control the ramp; the momentum
+  updater now runs after the optimizer step for clearer semantics.
+- **SimCLR negatives** – `method.ntxent_mode` toggles between the default
+  "paired" NT-Xent (B−1 negatives per view) and the original `2N`
+  formulation. The `2N` mode doubles the logits matrix, so monitor memory on
+  large batches. Enabling `method.cross_rank_negatives=true` gathers in-batch
+  negatives across ranks for DDP jobs.
+- **MoCo queue** – keep the per-rank FIFO (default) or turn on
+  `method.cross_rank_queue=true` to gather keys before enqueuing so every
+  rank sees the global queue. You can also enable SyncBatchNorm via
+  `method.use_syncbn=true` before DDP wrapping.
+- **SwAV assignments** – tune Sinkhorn stability with
+  `method.swav_sinkhorn_tol`, `method.swav_sinkhorn_max_iters`, and
+  `method.swav_use_fp32_sinkhorn`. Set `method.swav_codes_queue_size>0`
+  to maintain a small FIFO of past logits for the global crops, improving
+  assignment stability on small batches.
+
 Notes
 
 - AMP is enabled by default; the above keeps it that way for memory headroom.
@@ -192,9 +214,9 @@ epoch).【F:mfcl/engines/trainer.py†L198-L306】 Checkpoints (`ckpt_epXXXX.pt`
 - Pass `--ddp-find-unused-parameters` if your research branch introduces
   conditional computation that would otherwise drop gradients before the
   reducer sees them.【F:train.py†L120-L191】
-- MoCo keeps one negative queue per rank, matching the original paper. If you
-  need a global queue, extend the method with an `all_gather` enrichment stage
-  before enqueuing.
+- MoCo keeps a per-rank negative queue by default. Set
+  `method.cross_rank_queue=true` to all-gather keys before enqueuing so the
+  queue reflects the entire world size.
 - Sync BatchNorm is optional; call
   `torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)` before DDP wrapping if
   you would like to enable it.
