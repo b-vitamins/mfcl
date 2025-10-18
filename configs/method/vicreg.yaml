@@ -1,6 +1,4 @@
-method:
-  name: vicreg
-  vicreg_lambda: 25.0
-  vicreg_mu: 25.0
-  vicreg_nu: 1.0
-
+name: vicreg
+vicreg_lambda: 25.0
+vicreg_mu: 25.0
+vicreg_nu: 1.0

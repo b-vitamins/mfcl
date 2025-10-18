@@ -1,6 +1,4 @@
-optim:
-  name: sgd
-  lr: 0.05
-  weight_decay: 0.0001
-  momentum: 0.9
-
+name: sgd
+lr: 0.05
+weight_decay: 0.0001
+momentum: 0.9

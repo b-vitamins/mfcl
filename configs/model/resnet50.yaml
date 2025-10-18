@@ -1,0 +1,7 @@
+encoder: resnet50
+encoder_dim: 2048
+projector_hidden: 4096
+projector_out: 256
+predictor_hidden: 4096
+predictor_out: 256
+norm_feat: true

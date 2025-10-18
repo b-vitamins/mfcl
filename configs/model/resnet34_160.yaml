@@ -1,9 +1,0 @@
-model:
-  encoder: resnet34
-  encoder_dim: 512
-  projector_hidden: 2048
-  projector_out: 128
-  predictor_hidden: 1024
-  predictor_out: 256
-  norm_feat: true
-

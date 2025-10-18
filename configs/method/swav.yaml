@@ -1,6 +1,4 @@
-method:
-  name: swav
-  swav_prototypes: 3000
-  swav_sinkhorn_iters: 3
-  temperature: 0.1
-
+name: swav
+temperature: 0.1
+swav_prototypes: 3000
+swav_sinkhorn_iters: 3

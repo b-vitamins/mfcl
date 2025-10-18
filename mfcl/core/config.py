@@ -23,6 +23,7 @@ class DataConfig:
     """
 
     root: str
+    name: str = "imagenet"
     train_list: str | None = None
     val_list: str | None = None
     num_workers: int = 8
@@ -31,6 +32,9 @@ class DataConfig:
     pin_memory: bool = True
     persistent_workers: bool = True
     drop_last: bool = True
+    synthetic_num_classes: int = 1000
+    synthetic_train_size: int = 2048
+    synthetic_val_size: int = 512
 
 
 @dataclass
@@ -57,7 +61,7 @@ class ModelConfig:
     projector_hidden: int = 2048
     projector_out: int = 128
     predictor_hidden: int = 1024
-    predictor_out: int = 256
+    predictor_out: int = 128
     norm_feat: bool = True
 
 
@@ -127,12 +131,24 @@ def validate(cfg: Config) -> None:
         ValueError: If any constraint is violated. Error messages include the
             offending field name for quick remediation.
     """
+    dataset_kind = getattr(cfg.data, "name", "imagenet").lower()
+    if dataset_kind not in {"imagenet", "synthetic"}:
+        raise ValueError("data.name must be 'imagenet' or 'synthetic'")
+
     if cfg.data.batch_size <= 0:
         raise ValueError("data.batch_size must be > 0")
     if cfg.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
     if cfg.aug.img_size < 64:
         raise ValueError("aug.img_size must be >= 64")
+
+    if dataset_kind == "synthetic":
+        if cfg.data.synthetic_num_classes <= 0:
+            raise ValueError("data.synthetic_num_classes must be > 0 for synthetic data")
+        if cfg.data.synthetic_train_size <= 0:
+            raise ValueError("data.synthetic_train_size must be > 0 for synthetic data")
+        if cfg.data.synthetic_val_size <= 0:
+            raise ValueError("data.synthetic_val_size must be > 0 for synthetic data")
 
     if cfg.model.encoder_dim <= 0:
         raise ValueError("model.encoder_dim must be > 0")
@@ -170,6 +186,11 @@ def validate(cfg: Config) -> None:
         raise ValueError("method.moco_queue must be >= 1024 for method.moco")
     if cfg.method.name == "barlow" and cfg.method.barlow_lambda <= 0:
         raise ValueError("method.barlow_lambda must be > 0 for method.barlow")
+    if cfg.method.name in {"byol", "simsiam"}:
+        if cfg.model.predictor_out != cfg.model.projector_out:
+            raise ValueError(
+                "model.predictor_out must match model.projector_out for byol/simsiam"
+            )
     if cfg.method.name == "vicreg":
         if cfg.method.vicreg_lambda <= 0:
             raise ValueError("method.vicreg_lambda must be > 0 for method.vicreg")
