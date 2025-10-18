@@ -2,3 +2,7 @@ name: swav
 temperature: 0.1
 swav_prototypes: 3000
 swav_sinkhorn_iters: 3
+swav_sinkhorn_tol: 0.001
+swav_sinkhorn_max_iters: 100
+swav_use_fp32_sinkhorn: true
+swav_codes_queue_size: 0

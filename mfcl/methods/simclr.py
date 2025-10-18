@@ -21,6 +21,8 @@ class SimCLR(BaseMethod):
         projector: Projector,
         temperature: float = 0.1,
         normalize: bool = True,
+        ntxent_mode: str = "paired",
+        cross_rank_negatives: bool = False,
     ) -> None:
         """Construct SimCLR.
 
@@ -29,11 +31,18 @@ class SimCLR(BaseMethod):
             projector: Projector MLP mapping D -> d.
             temperature: NT-Xent temperature.
             normalize: If True, L2-normalize projections in the loss.
+            ntxent_mode: 'paired' or '2N' variant of NT-Xent.
+            cross_rank_negatives: Gather negatives across ranks when using DDP.
         """
         super().__init__()
         self.encoder = encoder
         self.projector = projector
-        self.loss_fn = NTXentLoss(temperature=temperature, normalize=normalize)
+        self.loss_fn = NTXentLoss(
+            temperature=temperature,
+            normalize=normalize,
+            mode=ntxent_mode,
+            cross_rank_negatives=cross_rank_negatives,
+        )
 
     def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         z1 = self.projector(self.encoder(batch["view1"]))

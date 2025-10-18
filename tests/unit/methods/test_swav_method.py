@@ -10,7 +10,15 @@ def test_swav_step_and_prototype_norm(toy_ssl_batch_multicrop):
     enc = TinyEncoder(32)
     proj = Projector(32, 64, 16)
     proto = SwAVPrototypes(num_prototypes=32, feat_dim=16, normalize=True)
-    m = SwAV(enc, proj, proto, temperature=0.1, epsilon=0.05, sinkhorn_iters=2)
+    m = SwAV(
+        enc,
+        proj,
+        proto,
+        temperature=0.1,
+        epsilon=0.05,
+        sinkhorn_iters=2,
+        codes_queue_size=0,
+    )
     batch = toy_ssl_batch_multicrop(B=2, C=3, Hg=16, Hl=8, locals_n=2)
     out = m.step(batch)
     assert "loss" in out
@@ -19,3 +27,25 @@ def test_swav_step_and_prototype_norm(toy_ssl_batch_multicrop):
     with torch.no_grad():
         norms = torch.norm(proto.weight, dim=1)
     assert torch.allclose(norms, torch.ones_like(norms), atol=1e-3)
+
+
+def test_swav_codes_queue_accumulates(toy_ssl_batch_multicrop):
+    enc = TinyEncoder(16)
+    proj = Projector(16, 32, 8)
+    proto = SwAVPrototypes(num_prototypes=16, feat_dim=8, normalize=True)
+    m = SwAV(
+        enc,
+        proj,
+        proto,
+        temperature=0.1,
+        epsilon=0.05,
+        sinkhorn_iters=2,
+        codes_queue_size=4,
+    )
+    batch = toy_ssl_batch_multicrop(B=2, C=3, Hg=16, Hl=8, locals_n=1)
+    m.step(batch)
+    assert m._codes_queue_rows.get(0, 0) == 2
+    assert m._codes_queue_rows.get(1, 0) == 2
+    m.step(batch)
+    assert m._codes_queue_rows.get(0, 0) == 4
+    assert m._codes_queue_rows.get(1, 0) == 4

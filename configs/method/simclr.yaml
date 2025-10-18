@@ -1,2 +1,4 @@
 name: simclr
 temperature: 0.1
+ntxent_mode: paired  # paired | 2N
+cross_rank_negatives: false

@@ -1,2 +1,5 @@
 name: byol
 byol_tau_base: 0.996
+byol_tau_final: 0.996
+byol_momentum_schedule: const  # const | cosine
+byol_momentum_schedule_steps: null

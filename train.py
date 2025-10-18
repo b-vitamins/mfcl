@@ -116,6 +116,37 @@ def _maybe_get_encoder(method: torch.nn.Module) -> torch.nn.Module:
 _CLI_FLAGS: dict[str, bool] = {"print_config": False, "ddp_find_unused": False}
 
 
+def _infer_steps_per_epoch(loader: DataLoader | None) -> int | None:
+    try:
+        if loader is None:
+            return None
+        return len(loader)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _maybe_autofill_byol_schedule_steps(conf: Config, steps_per_epoch: int | None) -> None:
+    method = getattr(conf.method, "name", "").lower()
+    if method != "byol":
+        return
+    schedule = getattr(conf.method, "byol_momentum_schedule", "const").lower()
+    if schedule != "cosine":
+        return
+    if conf.method.byol_momentum_schedule_steps is not None:
+        return
+    if steps_per_epoch is None:
+        raise ValueError(
+            "method.byol_momentum_schedule_steps must be set when using cosine "
+            "momentum scheduling and the train loader has no finite length."
+        )
+    total_steps = steps_per_epoch * conf.train.epochs
+    if total_steps <= 0:
+        raise ValueError(
+            "Computed method.byol_momentum_schedule_steps must be > 0. Check train.epochs."
+        )
+    conf.method.byol_momentum_schedule_steps = int(total_steps)
+
+
 @hydra.main(config_path="configs", config_name="config", version_base="1.3")
 def _hydra_entry(cfg: DictConfig) -> None:
     if torch.cuda.is_available() and os.environ.get("MFCL_CUDNN_BENCH", "0") == "1":
@@ -129,6 +160,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
     set_seed(conf.train.seed, deterministic=True)
 
     train_loader, val_loader = build_data(conf)
+    steps_per_epoch = _infer_steps_per_epoch(train_loader)
+    _maybe_autofill_byol_schedule_steps(conf, steps_per_epoch)
 
     distributed = get_world_size() > 1
     if torch.cuda.is_available():
@@ -151,10 +184,6 @@ def _hydra_entry(cfg: DictConfig) -> None:
             method = DDP(method, find_unused_parameters=find_unused)
 
     optimizer = build_optimizer(conf, method)
-    try:
-        steps_per_epoch = len(train_loader)  # type: ignore[arg-type]
-    except Exception:
-        steps_per_epoch = None
     scheduler = build_sched(conf, optimizer, steps_per_epoch=steps_per_epoch)
 
     console = ConsoleMonitor()

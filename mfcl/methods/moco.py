@@ -12,6 +12,7 @@ from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
 from mfcl.utils.ema import MomentumUpdater
 from mfcl.utils.queue import RingQueue
+from mfcl.utils import dist as dist_utils
 
 
 class MoCo(BaseMethod):
@@ -27,6 +28,7 @@ class MoCo(BaseMethod):
         momentum: float = 0.999,
         queue_size: int = 65536,
         normalize: bool = True,
+        cross_rank_queue: bool = False,
     ) -> None:
         """Construct MoCo.
 
@@ -39,6 +41,8 @@ class MoCo(BaseMethod):
             momentum: EMA momentum for key encoder params.
             queue_size: Number of stored negatives.
             normalize: Normalize in the loss.
+            cross_rank_queue: If True and using DDP, gather keys across ranks
+                before updating the queue so all processes share negatives.
         """
         super().__init__()
         self.encoder_q = encoder_q
@@ -51,6 +55,7 @@ class MoCo(BaseMethod):
         )
         self.temperature = float(temperature)
         self.do_normalize = bool(normalize)
+        self.cross_rank_queue = bool(cross_rank_queue)
 
     def on_train_start(self) -> None:
         self.updater.copy_params()
@@ -58,15 +63,15 @@ class MoCo(BaseMethod):
     def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         q = self.projector_q(self.encoder_q(batch["view1"]))
         with torch.no_grad():
-            self.updater.update()
             k = self.projector_k(self.encoder_k(batch["view2"]))
         return q, k
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         q, k = proj
+        queue_keys = self._queue_keys(k)
         seeded_queue = False
         if len(self.queue) == 0:
-            self.queue.enqueue(k.detach())
+            self.queue.enqueue(queue_keys)
             seeded_queue = True
 
         negatives = self.queue.get()
@@ -74,7 +79,7 @@ class MoCo(BaseMethod):
         loss, stats = self._info_nce_with(q, k, negatives)
 
         if not seeded_queue:
-            self.queue.enqueue(k.detach())
+            self.queue.enqueue(queue_keys)
 
         stats["loss"] = loss
         stats["queue_len"] = torch.tensor(
@@ -86,8 +91,7 @@ class MoCo(BaseMethod):
         return stats
 
     def on_optimizer_step(self) -> None:
-        # No action; EMA occurs pre-forward; queue updated during compute_loss.
-        return
+        self.updater.update()
 
     def _info_nce_with(
         self, q: torch.Tensor, k: torch.Tensor, negatives: torch.Tensor
@@ -132,6 +136,12 @@ class MoCo(BaseMethod):
             "neg_sim_mean": neg_sim_mean,
         }
         return loss, stats
+
+    def _queue_keys(self, k: torch.Tensor) -> torch.Tensor:
+        keys = k.detach().to(torch.float32)
+        if self.cross_rank_queue and dist_utils.get_world_size() > 1:
+            keys = dist_utils.all_gather_tensor(keys)
+        return keys.cpu()
 
 
 __all__ = ["MoCo"]
