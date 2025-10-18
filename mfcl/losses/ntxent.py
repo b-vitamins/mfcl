@@ -117,8 +117,26 @@ class NTXentLoss(nn.Module):
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         B = z1f.shape[0]
         rank = dist_utils.get_rank()
-        z1_all = dist_utils.all_gather_tensor(z1f.detach())
-        z2_all = dist_utils.all_gather_tensor(z2f.detach())
+
+        def _gather_preserve_local(tensor: torch.Tensor) -> torch.Tensor:
+            gathered = dist_utils.all_gather_tensor(tensor)
+            world = dist_utils.get_world_size()
+            if world <= 1:
+                return gathered
+            offset = rank * B
+            pieces = []
+            if offset > 0:
+                pieces.append(gathered[:offset].detach())
+            pieces.append(tensor)
+            end = offset + B
+            if end < gathered.shape[0]:
+                pieces.append(gathered[end:].detach())
+            if len(pieces) == 1:
+                return pieces[0]
+            return torch.cat(pieces, dim=0)
+
+        z1_all = _gather_preserve_local(z1f)
+        z2_all = _gather_preserve_local(z2f)
         offset = rank * B
 
         sim_i = z1f @ z2_all.t()
@@ -182,8 +200,26 @@ class NTXentLoss(nn.Module):
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         B = z1f.shape[0]
         rank = dist_utils.get_rank()
-        z1_all = dist_utils.all_gather_tensor(z1f.detach())
-        z2_all = dist_utils.all_gather_tensor(z2f.detach())
+
+        def _gather_preserve_local(tensor: torch.Tensor) -> torch.Tensor:
+            gathered = dist_utils.all_gather_tensor(tensor)
+            world = dist_utils.get_world_size()
+            if world <= 1:
+                return gathered
+            offset = rank * B
+            pieces = []
+            if offset > 0:
+                pieces.append(gathered[:offset].detach())
+            pieces.append(tensor)
+            end = offset + B
+            if end < gathered.shape[0]:
+                pieces.append(gathered[end:].detach())
+            if len(pieces) == 1:
+                return pieces[0]
+            return torch.cat(pieces, dim=0)
+
+        z1_all = _gather_preserve_local(z1f)
+        z2_all = _gather_preserve_local(z2f)
         world_B = z1_all.shape[0]
         offset = rank * B
 
