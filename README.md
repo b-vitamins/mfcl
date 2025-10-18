@@ -9,7 +9,7 @@ utilities for monitoring and plotting runs.
 ## Environment setup
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
@@ -46,7 +46,7 @@ environment.【F:configs/data/imagenet.yaml†L1-L11】
 
 `train.py` layers a compact CLI on top of Hydra overrides so you can
 mix ergonomic flags with advanced overrides when needed.【F:train.py†L111-L216】
-Inspect the full option set with `python train.py --help`. Common flags
+Inspect the full option set with `python3 train.py --help`. Common flags
 include:
 
 | Flag | Purpose |
@@ -72,7 +72,7 @@ you validate the full stack in seconds.【F:configs/data/synthetic.yaml†L1-L14
 Example command:
 
 ```bash
-python train.py --method simclr --data synthetic --model resnet18 \
+python3 train.py --method simclr --data synthetic --model resnet18 \
   --batch-size 8 --epochs 1 --lr 0.01 --num-workers 0 \
   data.synthetic_train_size=64 data.synthetic_val_size=32 \
   hydra.run.dir=./tmp_runs/simclr
@@ -81,46 +81,54 @@ python train.py --method simclr --data synthetic --model resnet18 \
 ### Full ImageNet training
 
 Run long ImageNet jobs by pointing at the dataset root and selecting
-your preferred recipe. The commands below illustrate the canonical
-configurations:
+your preferred recipe. If you are using Guix for dependency management
+or running inside a Guix‑spawned shell, prepend `guix shell -m manifest.scm --`
+to the commands below (e.g., `guix shell -m manifest.scm -- python3 train.py ...`).
+
+The commands below use ResNet‑18 with 160px crops:
 
 ```bash
-# SimCLR w/ ResNet-50 and SGD
-python train.py --method simclr --model resnet50 --optimizer sgd \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 256 --epochs 200 --warmup 10 --lr 0.5
+# SimCLR
+python3 train.py --method simclr --model resnet18 --optimizer sgd \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --warmup 10 --lr 0.25 \
+  --num-workers 8 --cudnn-bench
 
-# MoCo v2 w/ ResNet-34 and LARS
-python train.py --method moco --model resnet34 --optimizer lars \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 256 --epochs 200 --lr 0.3 --momentum 0.9 \
-  --moco-queue 65536 --knn
+# MoCo v2
+python3 train.py --method moco --model resnet18 --optimizer lars \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --lr 0.15 --momentum 0.9 \
+  --moco-queue 65536 --num-workers 8 --cudnn-bench
 
-# BYOL w/ ResNet-18 and AdamW
-python train.py --method byol --model resnet18 --optimizer adamw \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 128 --epochs 200 --lr 0.002 --weight-decay 1e-4
+# BYOL
+python3 train.py --method byol --model resnet18 --optimizer adamw \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --lr 0.002 --weight-decay 1e-4 \
+  --num-workers 8 --cudnn-bench
 
-# SimSiam w/ ResNet-50
-python train.py --method simsiam --model resnet50 --optimizer sgd \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 128 --epochs 200 --lr 0.05 --cosine
+# SimSiam
+python3 train.py --method simsiam --model resnet18 --optimizer sgd \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --lr 0.05 --cosine \
+  --num-workers 8 --cudnn-bench
 
-# SwAV with multi-crop augmentation
-python train.py --method swav --augment swav --model resnet18 \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 256 --epochs 200 --lr 0.6 --swav-prototypes 3000 \
-  --local-crops 6 --local-size 96
+# SwAV (multi‑crop)
+python3 train.py --method swav --augment swav --model resnet18 --optimizer sgd \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 64 --epochs 200 --lr 0.15 --swav-prototypes 3000 \
+  --local-crops 2 --local-size 96 --num-workers 8 --cudnn-bench
 
 # Barlow Twins
-python train.py --method barlow --model resnet18 --optimizer adamw \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 256 --epochs 200 --lr 0.001 --weight-decay 1e-6
+python3 train.py --method barlow --model resnet18 --optimizer adamw \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --lr 0.001 --weight-decay 1e-6 \
+  --num-workers 8 --cudnn-bench
 
 # VICReg
-python train.py --method vicreg --model resnet34 --optimizer sgd \
-  --data imagenet --dataset-root /path/to/imagenet \
-  --batch-size 256 --epochs 200 --lr 0.2 --vicreg-lambda 25 --vicreg-mu 25 --vicreg-nu 1
+python3 train.py --method vicreg --model resnet18 --optimizer sgd \
+  --data imagenet --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --lr 0.1 \
+  --vicreg-lambda 25 --vicreg-mu 25 --vicreg-nu 1 --num-workers 8 --cudnn-bench
 ```
 
 Hydra expands runs under `runs/${method}_${model}_${aug.img_size}/${now}`
@@ -128,6 +136,12 @@ by default so each experiment remains isolated.【F:configs/config.yaml†L1-L16
 Set `--run-dir` to keep checkpoints in a fixed directory. The trainer
 prints smoothed loss, learning-rate, throughput (`ips`), and ETA during
 training and summarizes per-epoch throughput in images/second.【F:mfcl/engines/trainer.py†L198-L288】【F:mfcl/utils/consolemonitor.py†L31-L120】
+
+Notes
+
+- AMP is enabled by default; the above keeps it that way for memory headroom.
+- You can omit `--dataset-root` if your path matches the default.
+- SwAV uses multi-crop; if it still OOMs, try `--batch-size 48` or reduce `--local-crops 1`.
 
 ## Linear evaluation
 
@@ -137,7 +151,7 @@ and accepts the checkpoint via `--checkpoint` (or `MFCL_CKPT`).【F:eval.py†L1
 Example synthetic smoke test:
 
 ```bash
-python eval.py --data synthetic --batch-size 32 --num-workers 0 \
+python3 eval.py --data synthetic --batch-size 32 --num-workers 0 \
   --checkpoint ./tmp_runs/simclr/ckpt_ep0001.pt \
   data.synthetic_train_size=128 data.synthetic_val_size=64 \
   linear.epochs=1 linear.lr=0.1 hydra.run.dir=./tmp_runs/linear
@@ -153,7 +167,7 @@ Provide the run directory containing `ckpt_epXXXX.pt` files and an
 optional output folder:
 
 ```bash
-python scripts/plot_metrics.py --runs runs/simclr_resnet18_224/20240101_120000 --out plots/simclr
+python3 scripts/plot_metrics.py --runs runs/simclr_resnet18_224/20240101_120000 --out plots/simclr
 ```
 
 The script exports common metrics (`loss`, `lr`, `time_per_batch`,
@@ -167,31 +181,31 @@ path are exercised in CI-like smoke tests. Reproduce them locally by
 executing the commands below (each runs for one epoch on FakeData):
 
 ```bash
-python train.py --method simclr --model resnet18 --data synthetic --optimizer sgd \
+python3 train.py --method simclr --model resnet18 --data synthetic --optimizer sgd \
   --epochs 1 --warmup 0 --batch-size 8 --lr 0.01 --num-workers 0 --knn --knn-period 1 \
   data.synthetic_train_size=64 data.synthetic_val_size=32 hydra.run.dir=./tmp_runs/simclr
 
-python train.py --method moco --model resnet34 --data synthetic --optimizer lars \
+python3 train.py --method moco --model resnet34 --data synthetic --optimizer lars \
   --epochs 1 --warmup 0 --batch-size 8 --lr 0.6 --num-workers 0 --moco-queue 2048 \
   data.synthetic_train_size=128 data.synthetic_val_size=48 hydra.run.dir=./tmp_runs/moco
 
-python train.py --method byol --model resnet18 --data synthetic --optimizer adamw \
+python3 train.py --method byol --model resnet18 --data synthetic --optimizer adamw \
   --epochs 1 --warmup 0 --batch-size 6 --lr 0.002 --num-workers 0 \
   data.synthetic_train_size=96 data.synthetic_val_size=48 hydra.run.dir=./tmp_runs/byol
 
-python train.py --method simsiam --model resnet50 --data synthetic --optimizer sgd \
+python3 train.py --method simsiam --model resnet50 --data synthetic --optimizer sgd \
   --epochs 1 --warmup 0 --batch-size 4 --lr 0.05 --num-workers 0 --img-size 224 \
   data.synthetic_train_size=64 data.synthetic_val_size=32 hydra.run.dir=./tmp_runs/simsiam
 
-python train.py --method barlow --model resnet18 --data synthetic --optimizer adamw \
+python3 train.py --method barlow --model resnet18 --data synthetic --optimizer adamw \
   --epochs 1 --warmup 0 --batch-size 16 --lr 0.001 --num-workers 0 --img-size 196 \
   data.synthetic_train_size=128 data.synthetic_val_size=64 hydra.run.dir=./tmp_runs/barlow
 
-python train.py --method vicreg --model resnet34 --data synthetic --optimizer sgd \
+python3 train.py --method vicreg --model resnet34 --data synthetic --optimizer sgd \
   --epochs 1 --warmup 0 --batch-size 12 --lr 0.2 --num-workers 0 --vicreg-lambda 15 \
   data.synthetic_train_size=96 data.synthetic_val_size=48 hydra.run.dir=./tmp_runs/vicreg
 
-python train.py --method swav --model resnet18 --data synthetic --optimizer sgd \
+python3 train.py --method swav --model resnet18 --data synthetic --optimizer sgd \
   --epochs 1 --warmup 0 --batch-size 8 --lr 0.3 --num-workers 0 --augment swav \
   --swav-prototypes 128 --local-crops 4 --local-size 96 \
   data.synthetic_train_size=128 data.synthetic_val_size=64 hydra.run.dir=./tmp_runs/swav
