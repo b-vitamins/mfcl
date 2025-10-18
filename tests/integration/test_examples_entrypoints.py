@@ -4,7 +4,7 @@ import importlib
 def test_import_examples_entrypoints():
     modules = [
         "train",
-        "eval_linear",
+        "eval",
         "scripts.plot_metrics",
     ]
     for m in modules:

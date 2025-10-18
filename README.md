@@ -3,7 +3,7 @@
 Mean-field contrastive learning (MFCL) ships a unified, Hydra-driven
 configuration stack for ImageNet-style self-supervised learning. The
 repository exposes two entrypoints – `train.py` for pretraining and
-`eval_linear.py` for frozen linear evaluation – together with lean
+`eval.py` for frozen linear evaluation – together with lean
 utilities for monitoring and plotting runs.
 
 ## Environment setup
@@ -131,13 +131,13 @@ training and summarizes per-epoch throughput in images/second.【F:mfcl/engines/
 
 ## Linear evaluation
 
-After pretraining, attach a linear probe using `eval_linear.py`. The
+After pretraining, attach a linear probe using `eval.py`. The
 CLI mirrors `train.py` with dataset, encoder, and optimizer controls,
-and accepts the checkpoint via `--checkpoint` (or `MFCL_CKPT`).【F:eval_linear.py†L121-L219】
+and accepts the checkpoint via `--checkpoint` (or `MFCL_CKPT`).【F:eval.py†L121-L219】
 Example synthetic smoke test:
 
 ```bash
-python eval_linear.py --data synthetic --batch-size 32 --num-workers 0 \
+python eval.py --data synthetic --batch-size 32 --num-workers 0 \
   --checkpoint ./tmp_runs/simclr/ckpt_ep0001.pt \
   data.synthetic_train_size=128 data.synthetic_val_size=64 \
   linear.epochs=1 linear.lr=0.1 hydra.run.dir=./tmp_runs/linear
