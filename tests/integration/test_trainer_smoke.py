@@ -11,6 +11,9 @@ class DummyMethod(torch.nn.Module):
         super().__init__()
         self.net = torch.nn.Linear(8 * 8 * 3, 1)
 
+    def forward(self, batch):
+        return self.step(batch)
+
     def step(self, batch):
         x = batch["view1"].flatten(1)
         y = self.net(x).mean()

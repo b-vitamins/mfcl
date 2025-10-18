@@ -84,6 +84,11 @@ class BaseMethod(nn.Module):
             raise KeyError("compute_loss must return a dict containing key 'loss'")
         return stats
 
+    def forward(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        """Alias ``forward`` to ``step`` so DDP wrappers engage gradient sync."""
+
+        return self.step(batch)
+
     # Optional lifecycle hooks (no-ops by default)
     def on_train_start(self) -> None:  # pragma: no cover - default no-op
         return

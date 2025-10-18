@@ -11,6 +11,9 @@ class DummyMethod(torch.nn.Module):
         super().__init__()
         self.fc = torch.nn.Linear(4, 1)
 
+    def forward(self, batch):
+        return self.step(batch)
+
     def step(self, batch):
         return {"loss": self.fc(batch["x"]).mean()}
 
