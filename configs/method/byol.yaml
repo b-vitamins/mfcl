@@ -1,4 +1,2 @@
-method:
-  name: byol
-  byol_tau_base: 0.996
-
+name: byol
+byol_tau_base: 0.996

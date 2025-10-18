@@ -1,0 +1,9 @@
+lr: 30.0
+epochs: 90
+momentum: 0.9
+weight_decay: 0.0
+milestones: [30, 60]
+batch_size: null
+feature_norm: false
+amp: false
+use_scaler: false

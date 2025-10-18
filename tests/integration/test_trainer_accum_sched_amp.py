@@ -36,7 +36,7 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     # Baseline: accum_steps=1
     m1 = LinearLossMethod()
     opt1 = torch.optim.SGD(m1.parameters(), lr=0.1)
-    sched1 = torch.optim.lr_scheduler.StepLR(opt1, step_size=1, gamma=0.1)
+    sched1 = torch.optim.lr_scheduler.StepLR(opt1, step_size=1, gamma=1.0)
     t1 = Trainer(
         m1,
         opt1,
@@ -52,7 +52,7 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     # Accum: accum_steps=2 should yield similar update over 2 steps
     m2 = LinearLossMethod()
     opt2 = torch.optim.SGD(m2.parameters(), lr=0.1)
-    sched2 = torch.optim.lr_scheduler.StepLR(opt2, step_size=1, gamma=0.1)
+    sched2 = torch.optim.lr_scheduler.StepLR(opt2, step_size=1, gamma=1.0)
     t2 = Trainer(
         m2,
         opt2,
@@ -64,9 +64,12 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     )
     t2.fit(_loader_const(2), epochs=1)
     w2 = m2.w.detach().clone()
-    # With per-batch scheduling and accumulation, updates should be very close
-    # (not bitwise identical in general). Allow a small numerical tolerance.
+    # With a constant LR schedule the accumulation path should match the
+    # baseline trajectory (up to numerical noise).
     assert torch.allclose(w1, w2, atol=1.1e-1, rtol=1e-4)
+    # The scheduler now steps once per optimizer update, so accumulation reduces
+    # the number of LR updates accordingly.
+    assert sched1.last_epoch == sched2.last_epoch + 1
 
     # When the loader length is not a multiple of accum_steps, the remaining
     # micro-batch should still produce an optimizer step (no gradients left
@@ -74,7 +77,7 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     m_flush_base = LinearLossMethod()
     opt_flush_base = torch.optim.SGD(m_flush_base.parameters(), lr=0.1)
     sched_flush_base = torch.optim.lr_scheduler.StepLR(
-        opt_flush_base, step_size=1, gamma=0.1
+        opt_flush_base, step_size=1, gamma=1.0
     )
     t_flush_base = Trainer(
         m_flush_base,
@@ -91,7 +94,7 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     m_flush_accum = LinearLossMethod()
     opt_flush_accum = torch.optim.SGD(m_flush_accum.parameters(), lr=0.1)
     sched_flush_accum = torch.optim.lr_scheduler.StepLR(
-        opt_flush_accum, step_size=1, gamma=0.1
+        opt_flush_accum, step_size=1, gamma=1.0
     )
     t_flush_accum = Trainer(
         m_flush_accum,

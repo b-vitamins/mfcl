@@ -49,7 +49,7 @@ class Trainer:
         hooks: Optional[Hook | HookList] = None,
         save_dir: Optional[str] = None,
         keep_k: int = 3,
-        log_interval: int = 50,
+        log_interval: int = 1,
         accum_steps: int = 1,
         clip_grad: Optional[float] = None,
         scheduler_step_on: str = "batch",
@@ -97,8 +97,6 @@ class Trainer:
         self.guard_grad_nan = bool(guard_grad_nan)
 
         self.method.to(self.device)
-        # Track micro-batches between optimizer steps for accumulation-invariant scheduling
-        self._sched_micro_batches = 0
         # Global step counts processed micro-batches across the lifetime of the trainer
         self._global_step = 0
 
@@ -195,17 +193,22 @@ class Trainer:
         self.method.train()
         loss_meter = SmoothedValue(window=50)
         time_meter = SmoothedValue(window=50)
+        throughput_meter = SmoothedValue(window=50)
 
         from collections.abc import Sized as _Sized
         total = len(loader) if isinstance(loader, _Sized) else 0
         last_lr = self.optimizer.param_groups[0]["lr"]
         self.optimizer.zero_grad(set_to_none=True)
-        self._sched_micro_batches = 0
         # t0 = time.time()
 
         # Running sums for epoch-level reduction
         sum_loss = 0.0
         count = 0
+        samples_seen = 0
+        epoch_time = 0.0
+
+        if is_main_process():
+            self.console.epoch_start(epoch, total)
 
         for step, batch in enumerate(loader):
             batch = self.to_device(batch)
@@ -232,14 +235,17 @@ class Trainer:
             count += 1
 
             do_step = ((step + 1) % self.accum_steps) == 0
-            if self.scheduler and self.scheduler_step_on == "batch":
-                self._sched_micro_batches += 1
             if do_step:
                 last_lr = self._apply_optimizer_step(self.accum_steps)
 
             # Update meters and console
             dt = time.time() - step_start
             time_meter.update(dt)
+            batch_size = self._infer_batch_size(batch)
+            if batch_size > 0 and dt > 0:
+                throughput_meter.update(batch_size / dt)
+                samples_seen += batch_size
+            epoch_time += dt
             loss_meter.update(float(loss.detach().to(torch.float32).item()))
 
             self._global_step += 1
@@ -257,6 +263,8 @@ class Trainer:
                     "loss": loss_meter.global_avg,
                     "lr": float(last_lr),
                 }
+                if throughput_meter.count > 0:
+                    metrics["ips"] = throughput_meter.global_avg
                 for k in (
                     "pos_sim",
                     "neg_sim_mean",
@@ -273,7 +281,19 @@ class Trainer:
                             metrics[k] = float(v.detach().to(torch.float32).item())
                         except Exception:
                             continue
-                self.console.live(epoch, step + 1, total, metrics)
+                self.console.live(
+                    epoch,
+                    step + 1,
+                    total,
+                    metrics,
+                    metric_order=(
+                        "loss",
+                        "lr",
+                        "ips",
+                        "pos_sim",
+                        "neg_sim_mean",
+                    ),
+                )
 
         # Flush gradients if the final micro-batch count does not evenly divide the
         # accumulation factor. Without this step, the trailing micro-batches would
@@ -292,19 +312,20 @@ class Trainer:
 
         if is_main_process():
             self.console.newline()
-            self.console.summary(
-                epoch,
-                {
-                    "loss": epoch_loss,
-                    "lr": float(last_lr),
-                    "time_per_batch": time_meter.global_avg,
-                },
-            )
+            summary_metrics = {
+                "loss": epoch_loss,
+                "lr": float(last_lr),
+                "time_per_batch": time_meter.global_avg,
+            }
+            if epoch_time > 0 and samples_seen > 0:
+                summary_metrics["imgs_per_sec"] = samples_seen / epoch_time
+            self.console.summary(epoch, summary_metrics)
 
         return {
             "loss": float(epoch_loss),
             "lr": float(last_lr),
             "time_per_batch": float(time_meter.global_avg),
+            "imgs_per_sec": float(samples_seen / epoch_time) if epoch_time > 0 else 0.0,
         }
 
     def _apply_optimizer_step(self, micro_batches_in_step: int) -> float:
@@ -346,13 +367,7 @@ class Trainer:
             except Exception:
                 pass
         if self.scheduler and self.scheduler_step_on == "batch":
-            # Step scheduler once per micro-batch since the last optimizer step to
-            # emulate "per-batch" schedules under gradient accumulation.
-            steps = int(self._sched_micro_batches)
-            if steps > 0:
-                for _ in range(steps):
-                    self.scheduler.step()
-            self._sched_micro_batches = 0
+            self.scheduler.step()
         return self.optimizer.param_groups[0]["lr"]
 
     @staticmethod
@@ -391,6 +406,31 @@ class Trainer:
                         return tuple(seq)
             return seq
         return obj
+
+    @staticmethod
+    def _infer_batch_size(batch: Any) -> int:
+        """Best-effort batch-size inference for throughput metrics."""
+
+        if torch.is_tensor(batch):
+            return int(batch.shape[0]) if batch.ndim > 0 else 0
+        if isinstance(batch, dict):
+            idx = batch.get("index")
+            if torch.is_tensor(idx) and idx.ndim > 0:
+                return int(idx.shape[0])
+            for value in batch.values():
+                if torch.is_tensor(value) and value.ndim > 0:
+                    return int(value.shape[0])
+                if isinstance(value, list) and value:
+                    first = value[0]
+                    if torch.is_tensor(first) and first.ndim > 0:
+                        return int(first.shape[0])
+        if isinstance(batch, (list, tuple)) and batch:
+            first = batch[0]
+            if torch.is_tensor(first) and first.ndim > 0:
+                return int(first.shape[0])
+            if isinstance(first, (list, tuple)):
+                return len(batch)
+        return 0
 
     def _restore_checkpoint_state(self, state: Dict[str, Any]) -> None:
         """Restore method/optimizer/scheduler/scaler state from a checkpoint."""

@@ -1,0 +1,21 @@
+# Top-level Hydra configuration for MFCL experiments.
+defaults:
+  - data: imagenet
+  - aug: simclr
+  - model: resnet18
+  - method: simclr
+  - optim: sgd
+  - train: default
+  - knn: disabled
+  - linear: default
+  - _self_
+
+hydra:
+  run:
+    dir: runs/${method.name}_${model.encoder}_${aug.img_size}/${now:%Y%m%d_%H%M%S}
+  job:
+    name: ${method.name}
+    chdir: false
+  sweep:
+    dir: runs/multirun/${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}

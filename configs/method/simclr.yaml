@@ -1,4 +1,2 @@
-method:
-  name: simclr
-  temperature: 0.1
-
+name: simclr
+temperature: 0.1

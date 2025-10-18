@@ -1,0 +1,9 @@
+epochs: 200
+warmup_epochs: 10
+cosine: true
+amp: true
+grad_clip: null
+save_dir: ${hydra:run.dir}
+seed: 42
+log_interval: 1
+scheduler_step_on: batch

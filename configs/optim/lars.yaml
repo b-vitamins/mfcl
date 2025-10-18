@@ -1,6 +1,4 @@
-optim:
-  name: lars
-  lr: 0.2
-  weight_decay: 0.0000015
-  momentum: 0.9
-
+name: lars
+lr: 0.2
+weight_decay: 0.0000015
+momentum: 0.9

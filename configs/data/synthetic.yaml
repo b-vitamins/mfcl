@@ -1,0 +1,14 @@
+# Lightweight synthetic dataset backed by torchvision.datasets.FakeData.
+name: synthetic
+root: ""
+train_list: null
+val_list: null
+num_workers: 0
+batch_size: 32
+shuffle: true
+pin_memory: false
+persistent_workers: false
+drop_last: true
+synthetic_num_classes: 100
+synthetic_train_size: 2048
+synthetic_val_size: 512
