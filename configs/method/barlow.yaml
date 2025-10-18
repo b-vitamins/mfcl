@@ -1,4 +1,2 @@
-method:
-  name: barlow
-  barlow_lambda: 0.005
-
+name: barlow
+barlow_lambda: 0.005

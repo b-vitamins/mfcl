@@ -603,12 +603,66 @@ def _build_eval_transforms(cfg: Config) -> Callable:
     )
 
 
+def _wrap_tensor_transform(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Ensure tensor inputs are converted to PIL before applying ``fn``."""
+
+    if fn is None:
+        return lambda img: img
+
+    try:
+        from torchvision import transforms as T
+    except ImportError as exc:  # pragma: no cover - exercised in optional dep tests
+        raise RuntimeError(
+            "torchvision is required for synthetic dataset support"
+        ) from exc
+
+    to_pil = T.ToPILImage()
+
+    def apply(img: Any) -> Any:
+        if isinstance(img, torch.Tensor):
+            img_pil = to_pil(img)
+        else:
+            img_pil = img
+        return fn(img_pil)
+
+    return apply
+
+
+def _build_synthetic_datasets(
+    cfg: Config, transform: Callable[[Any], Any], eval_transform: Callable[[Any], Any]
+) -> Tuple[Any, Any]:
+    try:
+        from torchvision.datasets import FakeData
+    except ImportError as exc:  # pragma: no cover - optional dependency gate
+        raise RuntimeError(
+            "torchvision is required for synthetic dataset support"
+        ) from exc
+
+    wrapped_train = _wrap_tensor_transform(transform)
+    wrapped_eval = _wrap_tensor_transform(eval_transform)
+
+    train_ds = FakeData(
+        size=int(cfg.data.synthetic_train_size),
+        image_size=(3, cfg.aug.img_size, cfg.aug.img_size),
+        num_classes=int(cfg.data.synthetic_num_classes),
+        transform=wrapped_train,
+    )
+    val_ds = FakeData(
+        size=int(cfg.data.synthetic_val_size),
+        image_size=(3, cfg.aug.img_size, cfg.aug.img_size),
+        num_classes=int(cfg.data.synthetic_num_classes),
+        transform=wrapped_eval,
+    )
+    return train_ds, val_ds
+
+
 def build_data(
     cfg: Config,
 ) -> Tuple[DataLoader, Optional[DataLoader]]:
-    """Create train and optional validation data loaders for ImageNet-1K.
+    """Create train and optional validation data loaders.
 
-    Uses torchvision's ``ImageFolder`` when file lists are not provided.
+    Uses torchvision's ``ImageFolder`` when file lists are not provided and can
+    fall back to synthetic data via ``torchvision.datasets.FakeData``.
     Collates batches into dicts of multiple views according to the selected
     method.
 
@@ -622,16 +676,19 @@ def build_data(
     transform = build_transforms(cfg)
     eval_transform = _build_eval_transforms(cfg)
 
-    # Build datasets via helper
-    from mfcl.data.imagenet1k import build_imagenet_datasets
+    dataset_kind = getattr(cfg.data, "name", "imagenet").lower()
+    if dataset_kind == "synthetic":
+        train_ds, val_ds = _build_synthetic_datasets(cfg, transform, eval_transform)
+    else:
+        from mfcl.data.imagenet1k import build_imagenet_datasets
 
-    train_ds, val_ds = build_imagenet_datasets(
-        root=cfg.data.root,
-        train_list=cfg.data.train_list,
-        val_list=cfg.data.val_list,
-        train_transform=transform,
-        val_transform=eval_transform,
-    )
+        train_ds, val_ds = build_imagenet_datasets(
+            root=cfg.data.root,
+            train_list=cfg.data.train_list,
+            val_list=cfg.data.val_list,
+            train_transform=transform,
+            val_transform=eval_transform,
+        )
 
     # Collate selection depends on method
     if cfg.method.name == "swav":

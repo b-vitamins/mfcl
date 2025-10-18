@@ -1,0 +1,11 @@
+# Default ImageNet-style dataset pointing at the common torchvision cache.
+name: imagenet
+root: ${oc.env:IMAGENET_ROOT,${oc.env:HOME}/.cache/torch/datasets/imagenet/ILSVRC2012_img}
+train_list: null
+val_list: null
+num_workers: 8
+batch_size: 256
+shuffle: true
+pin_memory: true
+persistent_workers: true
+drop_last: true

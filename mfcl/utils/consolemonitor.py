@@ -42,6 +42,36 @@ class ConsoleMonitor:
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    def epoch_start(
+        self,
+        epoch: int,
+        total: int | None = None,
+        *,
+        header: Sequence[str] | None = None,
+    ) -> None:
+        """Print a short epoch banner and reset timers."""
+
+        self.newline()
+        msg = f"Epoch {epoch:03d}"
+        if total is not None and total > 0:
+            msg += f" • batches={total}"
+        print(msg)
+        if header:
+            print(" ".join(header))
+        self.reset_epoch_timer()
+
+    @staticmethod
+    def _fmt_metric(name: str, value: float) -> str:
+        """Format metrics with human-friendly precision based on their name."""
+
+        if name in {"lr", "learning_rate"}:
+            return f"{float(value):.6f}"
+        if name in {"ips", "imgs_per_sec", "images_per_sec"}:
+            return f"{float(value):.1f}"
+        if "time" in name:
+            return f"{float(value):.3f}"
+        return f"{float(value):.4f}"
+
     def live(
         self,
         epoch: int,
@@ -84,14 +114,14 @@ class ConsoleMonitor:
                     seen.add(name)
                     value = metrics[name]
                     try:
-                        parts.append(f"{name}={float(value):.4f}")
+                        parts.append(f"{name}={self._fmt_metric(name, float(value))}")
                     except Exception:
                         continue
         for k, v in metrics.items():
             if k in seen:
                 continue
             try:
-                parts.append(f"{k}={float(v):.4f}")
+                parts.append(f"{k}={self._fmt_metric(k, float(v))}")
             except Exception:
                 # Skip non-floaty values
                 continue
@@ -139,14 +169,14 @@ class ConsoleMonitor:
                     seen.add(name)
                     value = metrics[name]
                     try:
-                        parts.append(f"{name}={float(value):.4f}")
+                        parts.append(f"{name}={self._fmt_metric(name, float(value))}")
                     except Exception:
                         continue
         for k, v in metrics.items():
             if k in seen:
                 continue
             try:
-                parts.append(f"{k}={float(v):.4f}")
+                parts.append(f"{k}={self._fmt_metric(k, float(v))}")
             except Exception:
                 continue
         msg = " ".join(parts)

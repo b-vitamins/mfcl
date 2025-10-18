@@ -1,5 +1,0 @@
-model:
-  projector_hidden: 2048
-  projector_out: 128
-  predictor_hidden: 1024
-  predictor_out: 256

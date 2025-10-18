@@ -14,9 +14,7 @@ def test_visual_script_generates_pdfs(tmp_path: Path):
             {"metrics": {"loss": float(1.0 / e), "lr": 0.1, "time_per_batch": 0.01}},
             run_dir / f"ckpt_ep{e:04d}.pt",
         )
-    script = Path(
-        "examples/selfsupervised/imagenet1k/resnet18_160/simclr/visual.py"
-    ).resolve()
+    script = Path("scripts/plot_metrics.py").resolve()
     out_dir = tmp_path / "plots"
     subprocess.run(
         [sys.executable, str(script), "--runs", str(run_dir), "--out", str(out_dir)],
