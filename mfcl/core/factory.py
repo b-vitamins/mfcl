@@ -437,18 +437,18 @@ def build_method(cfg: Config) -> BaseMethod:
             cfg.model.projector_out,
             use_bn=True,
         )
-        if cfg.method.use_syncbn and get_world_size() > 1:
+        if cfg.method.use_syncbn:
             convert = torch.nn.SyncBatchNorm.convert_sync_batchnorm
             enc_q = convert(enc_q)
             enc_k = convert(enc_k)
             proj_q = convert(proj_q)
             proj_k = convert(proj_k)
-        elif cfg.method.use_syncbn:
-            warnings.warn(
-                "method.use_syncbn requested but world_size == 1; skipping conversion.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if get_world_size() <= 1:
+                warnings.warn(
+                    "method.use_syncbn requested but world_size == 1; conversion will behave as regular BatchNorm.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         from mfcl.methods.moco import MoCo
 
         return MoCo(
