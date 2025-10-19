@@ -17,21 +17,18 @@ from mfcl.core.config import AugConfig
 from mfcl.transforms.common import gaussian_kernel_size, normalize_stats
 
 
-def _to_tensor32() -> Callable[[Any], torch.Tensor]:
-    """Return a callable converting PIL images to float32 tensors."""
+def _to_tensor_uint8() -> Callable[[Any], torch.Tensor]:
+    """Return a callable decoding PIL images to uint8 tensors."""
 
     from torchvision import transforms as T
 
-    return T.Compose([
-        T.PILToTensor(),
-        T.ConvertImageDtype(torch.float32),
-    ])
+    return T.PILToTensor()
 
 
 def build_gpu_pair_pretransform(cfg: AugConfig) -> Callable[[Any], Dict[str, torch.Tensor]]:
     """Return a minimal CPU transform that only decodes to tensor."""
 
-    to_tensor = _to_tensor32()
+    to_tensor = _to_tensor_uint8()
 
     def _transform(img: Any) -> Dict[str, torch.Tensor]:
         tensor = to_tensor(img)
@@ -43,7 +40,7 @@ def build_gpu_pair_pretransform(cfg: AugConfig) -> Callable[[Any], Dict[str, tor
 def build_gpu_multicrop_pretransform(cfg: AugConfig) -> Callable[[Any], Dict[str, torch.Tensor]]:
     """Return a minimal CPU transform for multi-crop GPU augmentation."""
 
-    to_tensor = _to_tensor32()
+    to_tensor = _to_tensor_uint8()
 
     def _transform(img: Any) -> Dict[str, torch.Tensor]:
         tensor = to_tensor(img)
