@@ -2,5 +2,7 @@ name: moco
 temperature: 0.2
 moco_momentum: 0.999
 moco_queue: 65536
+moco_queue_device: cpu
+moco_queue_dtype: fp32
 use_syncbn: false
 cross_rank_queue: false

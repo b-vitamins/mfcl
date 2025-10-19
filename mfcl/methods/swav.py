@@ -29,6 +29,7 @@ class SwAV(BaseMethod):
         sinkhorn_tol: float = 1e-3,
         sinkhorn_max_iters: int = 100,
         codes_queue_size: int = 0,
+        loss_fp32: bool = True,
     ) -> None:
         """Construct SwAV.
 
@@ -57,6 +58,7 @@ class SwAV(BaseMethod):
             use_float32_for_sinkhorn=use_float32_for_sinkhorn,
             sinkhorn_tol=sinkhorn_tol,
             sinkhorn_max_iters=sinkhorn_max_iters,
+            force_fp32=loss_fp32,
         )
         self.normalize_input = normalize_input
         self.codes_queue_size = max(int(codes_queue_size), 0)

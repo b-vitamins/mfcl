@@ -59,7 +59,7 @@ include:
 | `--img-size` / `--augment` | Override augmentation pipeline. |
 | `--epochs` / `--warmup` | Adjust schedule length. |
 | `--lr`, `--weight-decay`, `--momentum`, `--beta1`, `--beta2` | Tune optimizer hyperparameters. |
-| `--knn` / `--knn-period` | Enable periodic kNN evaluation during training. |
+| `--knn` / `--knn-period` / `--knn-bank-device` | Enable periodic kNN evaluation (defaults: every 20 epochs, GPU feature bank). |
 | `--run-dir` | Force checkpoints into a specific directory. |
 
 Additional overrides can be appended in Hydra syntax (e.g.
@@ -130,6 +130,24 @@ python3 train.py --method vicreg --model resnet18 --optimizer sgd \
   --img-size 160 --batch-size 128 --epochs 200 --lr 0.1 \
   --vicreg-lambda 25 --vicreg-mu 25 --vicreg-nu 1 --num-workers 8 --cudnn-bench
 ```
+
+### Throughput-focused preset
+
+Enable the new augmentation backend, deeper GPU prefetching, and channels-last
+activations to smooth out the "burst and pause" dataloader rhythm. Example
+command for SimCLR:
+
+```bash
+python3 train.py --method simclr --model resnet18 --data imagenet \
+  --dataset-root /home/b/.cache/torch/datasets/imagenet/ILSVRC2012_img \
+  --img-size 160 --batch-size 128 --epochs 200 --warmup 10 --lr 0.25 \
+  --num-workers 8 --worker-threads 1 --prefetch-factor 4 --prefetch-depth 2 \
+  --cudnn-bench --channels-last --prefetch-gpu --gpu-augment --aug-backend tv2
+```
+
+For MoCo-style runs, keep the negative queue on device with `--moco-queue-device
+cuda --moco-queue-dtype fp16`. Adjust `--prefetch-depth` and batch size if GPU
+memory becomes tight.
 
 Hydra expands runs under `runs/${method}_${model}_${aug.img_size}/${now}`
 by default so each experiment remains isolated.【F:configs/config.yaml†L1-L16】

@@ -14,7 +14,13 @@ class RingQueue:
     order (no rotation to chronological order is performed).
     """
 
-    def __init__(self, dim: int, size: int, device: str | torch.device = "cpu") -> None:
+    def __init__(
+        self,
+        dim: int,
+        size: int,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         """Construct a ring queue.
 
         Args:
@@ -28,7 +34,7 @@ class RingQueue:
         self.size = int(size)
         self.ptr = 0
         self.full = False
-        self.buf = torch.zeros(self.size, self.dim, device=device, dtype=torch.float32)
+        self.buf = torch.zeros(self.size, self.dim, device=device, dtype=dtype)
 
     @torch.no_grad()
     def enqueue(self, x: torch.Tensor) -> None:

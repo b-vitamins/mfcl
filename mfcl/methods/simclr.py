@@ -23,6 +23,7 @@ class SimCLR(BaseMethod):
         normalize: bool = True,
         ntxent_mode: str = "paired",
         cross_rank_negatives: bool = False,
+        loss_fp32: bool = True,
     ) -> None:
         """Construct SimCLR.
 
@@ -42,6 +43,7 @@ class SimCLR(BaseMethod):
             normalize=normalize,
             mode=ntxent_mode,
             cross_rank_negatives=cross_rank_negatives,
+            force_fp32=loss_fp32,
         )
 
     def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:

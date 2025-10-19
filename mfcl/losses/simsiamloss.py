@@ -12,7 +12,7 @@ import torch.nn.functional as F
 class SimSiamLoss(nn.Module):
     """Symmetric negative cosine loss with internal stopgrad."""
 
-    def __init__(self, normalize: bool = True) -> None:
+    def __init__(self, normalize: bool = True, force_fp32: bool = True) -> None:
         """Initialize SimSiam loss.
 
         Args:
@@ -20,6 +20,7 @@ class SimSiamLoss(nn.Module):
         """
         super().__init__()
         self.normalize = bool(normalize)
+        self.force_fp32 = bool(force_fp32)
 
     def forward(
         self,
@@ -55,10 +56,11 @@ class SimSiamLoss(nn.Module):
         z1 = z1.detach()
         z2 = z2.detach()
 
-        p1f = p1.to(torch.float32)
-        p2f = p2.to(torch.float32)
-        z1f = z1.to(torch.float32)
-        z2f = z2.to(torch.float32)
+        target_dtype = torch.float32 if self.force_fp32 else p1.dtype
+        p1f = p1.to(target_dtype)
+        p2f = p2.to(target_dtype)
+        z1f = z1.to(target_dtype)
+        z2f = z2.to(target_dtype)
 
         if self.normalize:
             p1f = F.normalize(p1f, dim=1)
@@ -69,6 +71,8 @@ class SimSiamLoss(nn.Module):
         cos1 = torch.sum(p1f * z2f, dim=1)
         cos2 = torch.sum(p2f * z1f, dim=1)
         loss = -0.5 * (cos1.mean() + cos2.mean())
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
         cos_sim = 0.5 * (cos1.mean() + cos2.mean())
         return loss, {"cos_sim": cos_sim.detach()}
 

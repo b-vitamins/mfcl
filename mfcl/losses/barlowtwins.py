@@ -23,6 +23,7 @@ class BarlowTwinsLoss(nn.Module):
         lambda_offdiag: float = 5e-3,
         eps: float = 1e-4,
         normalize_by_dim: bool = False,
+        force_fp32: bool = True,
     ) -> None:
         """Initialize Barlow Twins loss.
 
@@ -40,6 +41,7 @@ class BarlowTwinsLoss(nn.Module):
         self.lmb = float(lambda_offdiag)
         self.eps = float(eps)
         self.norm_by_dim = bool(normalize_by_dim)
+        self.force_fp32 = bool(force_fp32)
 
     def forward(
         self, z1: torch.Tensor, z2: torch.Tensor
@@ -63,8 +65,9 @@ class BarlowTwinsLoss(nn.Module):
         if B < 2:
             raise ValueError("batch size must be >= 2 for Barlow Twins")
 
-        x = z1.to(torch.float32)
-        y = z2.to(torch.float32)
+        target_dtype = torch.float32 if self.force_fp32 else z1.dtype
+        x = z1.to(target_dtype)
+        y = z2.to(target_dtype)
         # Center and normalize per-dimension
         x = x - x.mean(dim=0)
         y = y - y.mean(dim=0)
@@ -81,6 +84,8 @@ class BarlowTwinsLoss(nn.Module):
             diag_term = ((1.0 - diag) ** 2).sum()
             off_term = (off**2).sum()
         loss = diag_term + self.lmb * off_term
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         stats = {
             "diag_mean": diag.mean().detach(),

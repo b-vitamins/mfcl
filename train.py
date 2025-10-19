@@ -39,6 +39,7 @@ class KNNHook(Hook):
         k: int,
         temperature: float,
         every_n_epochs: int,
+        bank_device: str | torch.device = "cuda",
     ) -> None:
         self.encoder_getter = encoder_getter
         self.loader = loader
@@ -46,6 +47,11 @@ class KNNHook(Hook):
         self.temperature = float(max(1e-6, temperature))
         self.every = max(1, int(every_n_epochs))
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(bank_device, str):
+            bank_device = torch.device(bank_device)
+        if bank_device.type == "cuda" and not torch.cuda.is_available():
+            bank_device = torch.device("cpu")
+        self._bank_device = bank_device
 
     @torch.no_grad()
     def on_eval_end(self, metrics: dict) -> None:  # pragma: no cover - integration tested
@@ -56,14 +62,15 @@ class KNNHook(Hook):
             return
         encoder = self.encoder_getter().to(self._device)
         encoder.eval()
-        bank_feats, bank_labels = [], []
+        bank_feats: list[torch.Tensor] = []
+        bank_labels: list[torch.Tensor] = []
         for images, targets in self.loader:
             images = images.to(self._device, non_blocking=True)
             targets = targets.to(self._device, non_blocking=True)
             feats = encoder(images)
             feats = torch.nn.functional.normalize(feats, dim=1)
-            bank_feats.append(feats.cpu())
-            bank_labels.append(targets.cpu())
+            bank_feats.append(feats.to(self._bank_device, non_blocking=True))
+            bank_labels.append(targets.to(self._bank_device, non_blocking=True))
         if not bank_feats:
             return
         bank_feats_t = torch.cat(bank_feats, dim=0)
@@ -149,9 +156,6 @@ def _maybe_autofill_byol_schedule_steps(conf: Config, steps_per_epoch: int | Non
 
 @hydra.main(config_path="configs", config_name="config", version_base="1.3")
 def _hydra_entry(cfg: DictConfig) -> None:
-    if torch.cuda.is_available() and os.environ.get("MFCL_CUDNN_BENCH", "0") == "1":
-        torch.backends.cudnn.benchmark = True
-
     init_distributed()
     conf: Config = from_omegaconf(cfg)
     validate(conf)
@@ -159,18 +163,62 @@ def _hydra_entry(cfg: DictConfig) -> None:
         print(OmegaConf.to_yaml(cfg, resolve=True))
     set_seed(conf.train.seed, deterministic=True)
 
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = bool(conf.train.cudnn_bench)
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda", get_local_rank())
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    else:
+        device = torch.device("cpu")
+    if hasattr(torch, "set_float32_matmul_precision"):
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:  # pragma: no cover - defensive
+            pass
+
     train_loader, val_loader = build_data(conf)
+    if getattr(conf.train, "prefetch_gpu", False) and device.type == "cuda":
+        from mfcl.utils.prefetch import PrefetchLoader
+
+        train_loader = PrefetchLoader(
+            train_loader,
+            device,
+            channels_last=getattr(conf.train, "channels_last", False),
+            prefetch_depth=getattr(conf.train, "prefetch_depth", 1),
+        )
+
+    gpu_augmentor = None
+    if (
+        getattr(conf.train, "gpu_augment", False)
+        and getattr(conf.aug, "backend", "cpu").lower() == "tv2"
+    ):
+        from mfcl.transforms.gpu import build_gpu_augmentor
+
+        gpu_augmentor = build_gpu_augmentor(
+            conf.method.name,
+            conf.aug,
+            channels_last=getattr(conf.train, "channels_last", False),
+        )
+
     steps_per_epoch = _infer_steps_per_epoch(train_loader)
     _maybe_autofill_byol_schedule_steps(conf, steps_per_epoch)
 
     distributed = get_world_size() > 1
-    if torch.cuda.is_available():
-        device = torch.device("cuda", get_local_rank())
-    else:
-        device = torch.device("cpu")
 
     method = build_method(conf)
     method = method.to(device)
+    if getattr(conf.train, "channels_last", False):
+        try:
+            method.to(memory_format=torch.channels_last)
+        except (TypeError, RuntimeError):
+            pass
+    if getattr(conf.train, "compile", False):
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("train.compile requested but torch.compile is unavailable")
+        compile_mode = "max-autotune" if device.type == "cuda" else "reduce-overhead"
+        method = torch.compile(method, mode=compile_mode)  # type: ignore[operator]
     if distributed:
         find_unused = _CLI_FLAGS.get("ddp_find_unused", False)
         if torch.cuda.is_available():
@@ -198,6 +246,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
                 k=int(knn_cfg.get("k", 20)),
                 temperature=float(knn_cfg.get("temperature", 0.07)),
                 every_n_epochs=int(knn_cfg.get("every_n_epochs", 10)),
+                bank_device=knn_cfg.get("bank_device", "cuda"),
             )
         )
 
@@ -221,6 +270,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
         accum_steps=1,
         clip_grad=conf.train.grad_clip if conf.train.grad_clip is not None else None,
         scheduler_step_on=conf.train.scheduler_step_on,
+        channels_last_inputs=getattr(conf.train, "channels_last", False),
+        gpu_augmentor=gpu_augmentor,
     )
 
     trainer.fit(
@@ -250,8 +301,16 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"data.synthetic_val_size={int(args.synthetic_val)}")
     if args.num_workers is not None:
         overrides.append(f"data.num_workers={int(args.num_workers)}")
+    if args.prefetch_factor is not None:
+        overrides.append(f"data.prefetch_factor={int(args.prefetch_factor)}")
+    if args.mp_context:
+        overrides.append(f"data.multiprocessing_context={args.mp_context}")
+    if args.worker_threads is not None:
+        overrides.append(f"data.worker_threads={int(args.worker_threads)}")
     if args.pin_memory is not None:
         overrides.append(f"data.pin_memory={'true' if args.pin_memory else 'false'}")
+    if args.pin_memory_device:
+        overrides.append(f"data.pin_memory_device={args.pin_memory_device}")
     if args.batch_size is not None:
         overrides.append(f"data.batch_size={int(args.batch_size)}")
     if args.shuffle is not None:
@@ -262,6 +321,10 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"method.temperature={float(args.temperature)}")
     if args.moco_queue is not None:
         overrides.append(f"method.moco_queue={int(args.moco_queue)}")
+    if args.moco_queue_device:
+        overrides.append(f"method.moco_queue_device={args.moco_queue_device}")
+    if args.moco_queue_dtype:
+        overrides.append(f"method.moco_queue_dtype={args.moco_queue_dtype}")
     if args.swav_prototypes is not None:
         overrides.append(f"method.swav_prototypes={int(args.swav_prototypes)}")
     if args.vicreg_lambda is not None:
@@ -290,6 +353,8 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"aug.local_crops={int(args.local_crops)}")
     if args.local_size is not None:
         overrides.append(f"aug.local_size={int(args.local_size)}")
+    if args.aug_backend:
+        overrides.append(f"aug.backend={args.aug_backend}")
     if args.optimizer:
         overrides.append(f"optim={args.optimizer}")
     if args.lr is not None:
@@ -310,6 +375,20 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"train.grad_clip={float(args.grad_clip)}")
     if args.log_interval is not None:
         overrides.append(f"train.log_interval={int(args.log_interval)}")
+    if args.prefetch_gpu is not None:
+        overrides.append(f"train.prefetch_gpu={'true' if args.prefetch_gpu else 'false'}")
+    if args.gpu_augment is not None:
+        overrides.append(f"train.gpu_augment={'true' if args.gpu_augment else 'false'}")
+    if args.prefetch_depth is not None:
+        overrides.append(f"train.prefetch_depth={int(args.prefetch_depth)}")
+    if args.channels_last is not None:
+        overrides.append(f"train.channels_last={'true' if args.channels_last else 'false'}")
+    if args.compile is not None:
+        overrides.append(f"train.compile={'true' if args.compile else 'false'}")
+    if args.loss_fp32 is not None:
+        overrides.append(f"train.loss_fp32={'true' if args.loss_fp32 else 'false'}")
+    if args.cudnn_bench is not None:
+        overrides.append(f"train.cudnn_bench={'true' if args.cudnn_bench else 'false'}")
     if args.seed is not None:
         overrides.append(f"train.seed={int(args.seed)}")
     if args.run_dir:
@@ -328,6 +407,8 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"knn.temperature={float(args.knn_temperature)}")
     if args.knn_period is not None:
         overrides.append(f"knn.every_n_epochs={int(args.knn_period)}")
+    if args.knn_bank_device:
+        overrides.append(f"knn.bank_device={args.knn_bank_device}")
     overrides.extend(extra)
     return overrides
 
@@ -345,6 +426,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--synthetic-train", type=int, help="Synthetic dataset train size.")
     parser.add_argument("--synthetic-val", type=int, help="Synthetic dataset val size.")
     parser.add_argument("--num-workers", type=int, help="DataLoader worker processes.")
+    parser.add_argument("--worker-threads", type=int, help="Torch threads per DataLoader worker.")
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        help="Number of samples prefetched by each DataLoader worker.",
+    )
+    parser.add_argument(
+        "--mp-context",
+        help="torch.multiprocessing start method for DataLoader workers.",
+    )
+    parser.add_argument(
+        "--pin-memory-device",
+        help="Device passed to DataLoader(pin_memory_device).",
+    )
     pm_group = parser.add_mutually_exclusive_group()
     pm_group.add_argument("--pin-memory", dest="pin_memory", action="store_true", help="Enable pin_memory")
     pm_group.add_argument("--no-pin-memory", dest="pin_memory", action="store_false", help="Disable pin_memory")
@@ -358,6 +453,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--img-size", type=int, help="Augmentation image size (pixels).")
     parser.add_argument("--local-crops", type=int, help="Number of local crops (for SwAV).")
     parser.add_argument("--local-size", type=int, help="Size of local crops (for SwAV).")
+    parser.add_argument(
+        "--aug-backend",
+        choices=["cpu", "tv2"],
+        help="Augmentation backend ('cpu' or 'tv2').",
+    )
     parser.add_argument("--model", "-b", help="Model config group (resnet18, resnet34, resnet50, timm:...).")
     parser.add_argument("--encoder-dim", type=int, help="Override encoder output dimension.")
     parser.add_argument("--projector-hidden", type=int, help="Projector hidden dimension.")
@@ -374,6 +474,95 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", type=int, help="Warmup epochs before cosine schedule.")
     parser.add_argument("--grad-clip", type=float, help="Gradient clipping max-norm.")
     parser.add_argument("--log-interval", type=int, help="Batches between log updates.")
+    parser.add_argument(
+        "--prefetch-depth",
+        type=int,
+        help="Number of batches to stage on device with GPU prefetch.",
+    )
+    prefetch_group = parser.add_mutually_exclusive_group()
+    prefetch_group.add_argument(
+        "--prefetch-gpu",
+        dest="prefetch_gpu",
+        action="store_true",
+        help="Enable asynchronous GPU prefetch of training batches.",
+    )
+    prefetch_group.add_argument(
+        "--no-prefetch-gpu",
+        dest="prefetch_gpu",
+        action="store_false",
+        help="Disable GPU prefetch when enabled in config.",
+    )
+    parser.set_defaults(prefetch_gpu=None)
+    gpu_aug_group = parser.add_mutually_exclusive_group()
+    gpu_aug_group.add_argument(
+        "--gpu-augment",
+        dest="gpu_augment",
+        action="store_true",
+        help="Enable torchvision v2 GPU augmentation when available.",
+    )
+    gpu_aug_group.add_argument(
+        "--no-gpu-augment",
+        dest="gpu_augment",
+        action="store_false",
+        help="Disable GPU augmentation even if configured.",
+    )
+    parser.set_defaults(gpu_augment=None)
+    channels_group = parser.add_mutually_exclusive_group()
+    channels_group.add_argument(
+        "--channels-last",
+        dest="channels_last",
+        action="store_true",
+        help="Enable channels-last memory format for model and inputs.",
+    )
+    channels_group.add_argument(
+        "--no-channels-last",
+        dest="channels_last",
+        action="store_false",
+        help="Disable channels-last memory format.",
+    )
+    parser.set_defaults(channels_last=None)
+    compile_group = parser.add_mutually_exclusive_group()
+    compile_group.add_argument(
+        "--compile",
+        dest="compile",
+        action="store_true",
+        help="Compile the model with torch.compile for optimized kernels.",
+    )
+    compile_group.add_argument(
+        "--no-compile",
+        dest="compile",
+        action="store_false",
+        help="Disable torch.compile if enabled in the config.",
+    )
+    parser.set_defaults(compile=None)
+    loss_group = parser.add_mutually_exclusive_group()
+    loss_group.add_argument(
+        "--loss-fp32",
+        dest="loss_fp32",
+        action="store_true",
+        help="Force losses to run in float32 (default).",
+    )
+    loss_group.add_argument(
+        "--no-loss-fp32",
+        dest="loss_fp32",
+        action="store_false",
+        help="Allow losses to follow autocast dtype without fp32 promotion.",
+    )
+    parser.set_defaults(loss_fp32=None)
+    bench_group = parser.add_mutually_exclusive_group()
+    bench_group.add_argument(
+        "--cudnn-bench",
+        dest="cudnn_bench",
+        action="store_true",
+        help="Enable torch.backends.cudnn.benchmark.",
+    )
+    bench_group.add_argument(
+        "--no-cudnn-bench",
+        dest="cudnn_bench",
+        action="store_false",
+        help="Disable cudnn benchmark heuristic selection.",
+    )
+    parser.set_defaults(cudnn_bench=None)
     parser.add_argument("--seed", type=int, help="Random seed.")
     parser.add_argument("--run-dir", help="Explicit checkpoint directory (train.save_dir).")
     parser.add_argument(
@@ -383,6 +572,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, help="InfoNCE / MoCo / SwAV temperature.")
     parser.add_argument("--moco-queue", type=int, help="MoCo queue size.")
+    parser.add_argument(
+        "--moco-queue-device",
+        choices=["cpu", "cuda"],
+        help="Device used to store MoCo negatives.",
+    )
+    parser.add_argument(
+        "--moco-queue-dtype",
+        choices=["fp32", "fp16"],
+        help="Precision used for the MoCo negative queue.",
+    )
     parser.add_argument("--swav-prototypes", type=int, help="Number of SwAV prototypes.")
     parser.add_argument("--vicreg-lambda", type=float, help="VICReg invariance coefficient.")
     parser.add_argument("--vicreg-mu", type=float, help="VICReg variance coefficient.")
@@ -393,6 +592,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--knn-k", type=int, help="Number of neighbours for kNN monitor.")
     parser.add_argument("--knn-temperature", type=float, help="Softmax temperature for kNN monitor.")
     parser.add_argument("--knn-period", type=int, help="Epoch period for kNN monitor.")
+    parser.add_argument(
+        "--knn-bank-device",
+        choices=["cpu", "cuda"],
+        help="Device used to store the kNN feature bank.",
+    )
     amp_group = parser.add_mutually_exclusive_group()
     amp_group.add_argument("--amp", dest="amp", action="store_true", help="Enable mixed precision training.")
     amp_group.add_argument("--no-amp", dest="amp", action="store_false", help="Disable mixed precision training.")
@@ -402,11 +606,6 @@ def _build_parser() -> argparse.ArgumentParser:
     cos_group.add_argument("--no-cosine", dest="cosine", action="store_false", help="Disable cosine LR schedule.")
     parser.set_defaults(cosine=None)
     parser.add_argument("--resume", help="Resume from checkpoint path (sets MFCL_RESUME).")
-    parser.add_argument(
-        "--cudnn-bench",
-        action="store_true",
-        help="Enable torch.backends.cudnn.benchmark for performance tuning.",
-    )
     parser.add_argument(
         "--print-config",
         action="store_true",
@@ -429,8 +628,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.resume:
         os.environ["MFCL_RESUME"] = args.resume
-    if args.cudnn_bench:
-        os.environ["MFCL_CUDNN_BENCH"] = "1"
     _CLI_FLAGS["print_config"] = bool(args.print_config)
     _CLI_FLAGS["ddp_find_unused"] = bool(getattr(args, "ddp_find_unused", False))
 

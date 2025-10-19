@@ -27,7 +27,14 @@ def test_knn_hook_excludes_self_from_bank():
     loader = DataLoader(TensorDataset(features, labels), batch_size=1, shuffle=False)
 
     encoder = IdentityEncoder()
-    hook = KNNHook(lambda: encoder, loader, k=1, temperature=0.07, every_n_epochs=1)
+    hook = KNNHook(
+        lambda: encoder,
+        loader,
+        k=1,
+        temperature=0.07,
+        every_n_epochs=1,
+        bank_device="cpu",
+    )
     hook._device = torch.device("cpu")
 
     metrics = {"epoch": 1}

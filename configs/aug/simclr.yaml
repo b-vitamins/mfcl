@@ -7,3 +7,4 @@ blur_prob: 0.5
 gray_prob: 0.2
 solarize_prob: 0.0
 solarize_threshold: 128
+backend: cpu  # set to 'tv2' to enable torchvision v2 tensor transforms on GPU

@@ -21,11 +21,16 @@ class BarlowTwins(BaseMethod):
         projector: Projector,
         lambda_offdiag: float = 5e-3,
         eps: float = 1e-4,
+        loss_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.projector = projector
-        self.loss_fn = BarlowTwinsLoss(lambda_offdiag=lambda_offdiag, eps=eps)
+        self.loss_fn = BarlowTwinsLoss(
+            lambda_offdiag=lambda_offdiag,
+            eps=eps,
+            force_fp32=loss_fp32,
+        )
 
     def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         z1 = self.projector(self.encoder(batch["view1"]))

@@ -22,12 +22,13 @@ class SimSiam(BaseMethod):
         projector: Projector,
         predictor: Predictor,
         normalize: bool = True,
+        loss_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.projector = projector
         self.predictor = predictor
-        self.loss_fn = SimSiamLoss(normalize=normalize)
+        self.loss_fn = SimSiamLoss(normalize=normalize, force_fp32=loss_fp32)
 
     def forward_views(
         self, batch: Dict[str, Any]

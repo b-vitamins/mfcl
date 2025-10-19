@@ -8,6 +8,7 @@ registered via explicit calls and constructed deterministically.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import warnings
 
@@ -124,6 +125,34 @@ except (ImportError, ModuleNotFoundError) as err:
     )
 except Exception as err:  # pragma: no cover - exercised via dedicated unit test
     raise RuntimeError("Unexpected error while registering transforms") from err
+
+
+_THREAD_ENV_SET = False
+
+
+def _ensure_thread_env_defaults() -> None:
+    """Set global OMP/MKL thread env defaults once."""
+
+    global _THREAD_ENV_SET
+    if _THREAD_ENV_SET:
+        return
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    _THREAD_ENV_SET = True
+
+
+def _make_worker_init_fn(max_threads: int) -> Callable[[int], None]:
+    """Return a DataLoader worker init fn that caps intra-op threads."""
+
+    max_threads = int(max(1, max_threads))
+
+    def _init_fn(worker_id: int) -> None:  # pragma: no cover - torch worker entry
+        try:
+            torch.set_num_threads(max_threads)
+        except Exception:
+            pass
+
+    return _init_fn
 
 try:
     from mfcl.methods.simclr import SimCLR
@@ -401,6 +430,7 @@ def build_method(cfg: Config) -> BaseMethod:
         here avoids ambiguity around heterogeneous method constructors.
     """
     name = cfg.method.name.lower()
+    loss_fp32 = getattr(cfg.train, "loss_fp32", True)
     if name == "simclr":
         encoder = build_encoder(cfg)
         proj_ctor = HEAD_REGISTRY.get("projector")
@@ -419,6 +449,7 @@ def build_method(cfg: Config) -> BaseMethod:
             normalize=True,
             ntxent_mode=cfg.method.ntxent_mode,
             cross_rank_negatives=cfg.method.cross_rank_negatives,
+            loss_fp32=loss_fp32,
         )
 
     if name == "moco":
@@ -461,6 +492,9 @@ def build_method(cfg: Config) -> BaseMethod:
             queue_size=cfg.method.moco_queue,
             normalize=True,
             cross_rank_queue=cfg.method.cross_rank_queue,
+            queue_device=cfg.method.moco_queue_device,
+            queue_dtype=cfg.method.moco_queue_dtype,
+            loss_fp32=loss_fp32,
         )
 
     if name == "byol":
@@ -501,6 +535,7 @@ def build_method(cfg: Config) -> BaseMethod:
             momentum_schedule_steps=cfg.method.byol_momentum_schedule_steps,
             normalize=True,
             variant="cosine",
+            loss_fp32=loss_fp32,
         )
 
     if name == "simsiam":
@@ -523,7 +558,11 @@ def build_method(cfg: Config) -> BaseMethod:
         from mfcl.methods.simsiam import SimSiam
 
         return SimSiam(
-            encoder=encoder, projector=projector, predictor=predictor, normalize=True
+            encoder=encoder,
+            projector=projector,
+            predictor=predictor,
+            normalize=True,
+            loss_fp32=loss_fp32,
         )
 
     if name == "barlow":
@@ -541,6 +580,7 @@ def build_method(cfg: Config) -> BaseMethod:
             encoder=encoder,
             projector=projector,
             lambda_offdiag=cfg.method.barlow_lambda,
+            loss_fp32=loss_fp32,
         )
 
     if name == "vicreg":
@@ -560,6 +600,7 @@ def build_method(cfg: Config) -> BaseMethod:
             lambda_inv=cfg.method.vicreg_lambda,
             mu_var=cfg.method.vicreg_mu,
             nu_cov=cfg.method.vicreg_nu,
+            loss_fp32=loss_fp32,
         )
 
     if name == "swav":
@@ -593,6 +634,7 @@ def build_method(cfg: Config) -> BaseMethod:
             sinkhorn_tol=cfg.method.swav_sinkhorn_tol,
             sinkhorn_max_iters=cfg.method.swav_sinkhorn_max_iters,
             codes_queue_size=cfg.method.swav_codes_queue_size,
+            loss_fp32=loss_fp32,
         )
 
     raise KeyError(f"Unknown method: {cfg.method.name}")
@@ -601,15 +643,25 @@ def build_method(cfg: Config) -> BaseMethod:
 def build_transforms(cfg: Config) -> Callable[[Any], Dict[str, Any]]:
     """Return an image transform that yields multiple views.
 
-    For two-view methods, returns the SimCLR pair transform. For SwAV, returns
-    a multi-crop transform.
-
-    Args:
-        cfg: Global configuration with aug and method sections.
-
-    Returns:
-        A callable ``img -> dict[str, Tensor]`` mapping.
+    Chooses between PIL-based CPU pipelines and lightweight tensor decoders when
+    GPU augmentation is enabled via ``aug.backend``.
     """
+
+    backend = getattr(cfg.aug, "backend", "cpu").lower()
+    if backend == "tv2":
+        try:
+            from mfcl.transforms.gpu import (
+                build_gpu_multicrop_pretransform,
+                build_gpu_pair_pretransform,
+            )
+        except ImportError as exc:  # pragma: no cover - optional dependency path
+            raise RuntimeError(
+                "torchvision>=0.15 with transforms.v2 is required for aug.backend='tv2'"
+            ) from exc
+        if cfg.method.name == "swav":
+            return build_gpu_multicrop_pretransform(cfg.aug)
+        return build_gpu_pair_pretransform(cfg.aug)
+
     if cfg.method.name == "swav":
         ctor = TRANSFORM_REGISTRY.get("multicrop")
         return ctor(cfg.aug)
@@ -703,6 +755,8 @@ def build_data(
     Returns:
         Tuple ``(train_loader, val_loader_or_none)``.
     """
+    _ensure_thread_env_defaults()
+
     # Build transforms via registry
     transform = build_transforms(cfg)
     eval_transform = _build_eval_transforms(cfg)
@@ -745,6 +799,18 @@ def build_data(
             drop_last=cfg.data.drop_last,
         )
 
+    loader_kwargs = {}
+    if cfg.data.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = int(max(1, cfg.data.prefetch_factor))
+        loader_kwargs["worker_init_fn"] = _make_worker_init_fn(cfg.data.worker_threads)
+    if cfg.data.multiprocessing_context:
+        loader_kwargs["multiprocessing_context"] = cfg.data.multiprocessing_context
+    pin_device = cfg.data.pin_memory_device
+    if not torch.cuda.is_available():
+        pin_device = None
+    if cfg.data.pin_memory and pin_device:
+        loader_kwargs["pin_memory_device"] = pin_device
+
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.data.batch_size,
@@ -755,10 +821,12 @@ def build_data(
         persistent_workers=persist_workers,
         drop_last=cfg.data.drop_last,
         collate_fn=collate_fn,
+        **loader_kwargs,
     )
 
     val_loader: Optional[DataLoader] = None
     if val_ds is not None:
+        val_kwargs = dict(loader_kwargs)
         val_loader = DataLoader(
             val_ds,
             batch_size=cfg.data.batch_size,
@@ -769,6 +837,7 @@ def build_data(
             persistent_workers=persist_workers,
             drop_last=False,
             collate_fn=None,  # use default; eval_transform yields single-view tensors
+            **val_kwargs,
         )
 
     return train_loader, val_loader

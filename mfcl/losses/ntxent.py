@@ -30,6 +30,7 @@ class NTXentLoss(nn.Module):
         normalize: bool = True,
         mode: str = "paired",
         cross_rank_negatives: bool = False,
+        force_fp32: bool = True,
     ) -> None:
         """Initialize NT-Xent loss.
 
@@ -55,6 +56,7 @@ class NTXentLoss(nn.Module):
         else:
             raise ValueError("mode must be 'paired' or '2N'")
         self.cross_rank_negatives = bool(cross_rank_negatives)
+        self.force_fp32 = bool(force_fp32)
 
     def forward(
         self, z1: torch.Tensor, z2: torch.Tensor
@@ -82,8 +84,9 @@ class NTXentLoss(nn.Module):
         if B < 2:
             raise ValueError("batch size must be >= 2 for NT-Xent")
 
-        z1f = z1.to(torch.float32)
-        z2f = z2.to(torch.float32)
+        target_dtype = torch.float32 if self.force_fp32 else z1.dtype
+        z1f = z1.to(target_dtype)
+        z2f = z2.to(target_dtype)
         if self.normalize:
             z1f = F.normalize(z1f, dim=1)
             z2f = F.normalize(z2f, dim=1)
@@ -105,6 +108,10 @@ class NTXentLoss(nn.Module):
         loss_i = F.cross_entropy(logits_i, labels)
         loss_j = F.cross_entropy(logits_j, labels)
         loss = 0.5 * (loss_i + loss_j)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         pos_sim = torch.diag(sim).mean().detach()
         neg_mask = ~torch.eye(z1f.shape[0], dtype=torch.bool, device=sim.device)
@@ -149,6 +156,8 @@ class NTXentLoss(nn.Module):
         loss_j = F.cross_entropy(logits_j, targets)
 
         loss = 0.5 * (loss_i + loss_j)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         pos_sim = torch.sum(z1f * z2f, dim=1).mean().detach()
         mask_i = torch.ones_like(sim_i, dtype=torch.bool)
@@ -182,6 +191,12 @@ class NTXentLoss(nn.Module):
         labels = torch.arange(B, device=logits.device)
         targets = torch.cat([labels + B, labels], dim=0)
         loss = F.cross_entropy(logits, targets)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         diag_pos = torch.diag(sim_full, diagonal=B)
         diag_pos_rev = torch.diag(sim_full, diagonal=-B)

@@ -12,7 +12,12 @@ import torch.nn.functional as F
 class BYOLLoss(nn.Module):
     """Symmetric cosine/MSE BYOL loss with internal stopgrad on target."""
 
-    def __init__(self, normalize: bool = True, variant: str = "cosine") -> None:
+    def __init__(
+        self,
+        normalize: bool = True,
+        variant: str = "cosine",
+        force_fp32: bool = True,
+    ) -> None:
         """Initialize BYOL loss.
 
         Args:
@@ -27,6 +32,7 @@ class BYOLLoss(nn.Module):
             raise ValueError("variant must be 'cosine' or 'mse'")
         self.normalize = bool(normalize)
         self.variant = variant
+        self.force_fp32 = bool(force_fp32)
 
     def forward(
         self,
@@ -63,10 +69,11 @@ class BYOLLoss(nn.Module):
         z1 = z1.detach()
         z2 = z2.detach()
 
-        p1f = p1.to(torch.float32)
-        p2f = p2.to(torch.float32)
-        z1f = z1.to(torch.float32)
-        z2f = z2.to(torch.float32)
+        target_dtype = torch.float32 if self.force_fp32 else p1.dtype
+        p1f = p1.to(target_dtype)
+        p2f = p2.to(target_dtype)
+        z1f = z1.to(target_dtype)
+        z2f = z2.to(target_dtype)
 
         if self.normalize:
             p1f = F.normalize(p1f, dim=1)
@@ -86,6 +93,8 @@ class BYOLLoss(nn.Module):
                 (p1f - z2f).pow(2).sum(dim=1).mean()
                 + (p2f - z1f).pow(2).sum(dim=1).mean()
             )
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         stats = {"cos_sim": cos_sim.detach()}
         return loss, stats

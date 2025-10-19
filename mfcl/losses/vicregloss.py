@@ -27,6 +27,7 @@ class VICRegLoss(nn.Module):
         nu_cov: float = 1.0,
         gamma: float = 1.0,
         eps: float = 1e-4,
+        force_fp32: bool = True,
     ) -> None:
         """Initialize VICReg loss.
 
@@ -63,6 +64,7 @@ class VICRegLoss(nn.Module):
         self.nu_cov = float(nu_cov)
         self.gamma = float(gamma)
         self.eps = float(eps)
+        self.force_fp32 = bool(force_fp32)
 
     def forward(
         self, z1: torch.Tensor, z2: torch.Tensor
@@ -89,8 +91,9 @@ class VICRegLoss(nn.Module):
         if B < 2:
             raise ValueError("batch size must be >= 2 for VICReg")
 
-        x = z1.to(torch.float32)
-        y = z2.to(torch.float32)
+        target_dtype = torch.float32 if self.force_fp32 else z1.dtype
+        x = z1.to(target_dtype)
+        y = z2.to(target_dtype)
 
         # Invariance term (MSE between views)
         mse = F.mse_loss(x, y)
@@ -113,6 +116,8 @@ class VICRegLoss(nn.Module):
         )
 
         loss = self.lambda_inv * mse + self.mu_var * var + self.nu_cov * cov
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
         stats = {
             "mse": mse.detach(),
             "std_mean": 0.5 * (sx.mean() + sy.mean()).detach(),

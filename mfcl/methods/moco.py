@@ -29,6 +29,9 @@ class MoCo(BaseMethod):
         queue_size: int = 65536,
         normalize: bool = True,
         cross_rank_queue: bool = False,
+        queue_device: str | torch.device = "cpu",
+        queue_dtype: str | torch.dtype = torch.float32,
+        loss_fp32: bool = True,
     ) -> None:
         """Construct MoCo.
 
@@ -50,12 +53,35 @@ class MoCo(BaseMethod):
         self.projector_q = projector_q
         self.projector_k = projector_k
         self.updater = MomentumUpdater(self.encoder_q, self.encoder_k, momentum)
+
+        if isinstance(queue_device, str):
+            queue_device = torch.device(queue_device)
+        if isinstance(queue_dtype, str):
+            mapping = {
+                "fp32": torch.float32,
+                "float32": torch.float32,
+                "fp16": torch.float16,
+                "float16": torch.float16,
+            }
+            key = queue_dtype.lower()
+            if key not in mapping:
+                raise ValueError(f"Unsupported queue dtype: {queue_dtype}")
+            queue_dtype_t = mapping[key]
+        else:
+            queue_dtype_t = queue_dtype
+
+        self.queue_device = queue_device
+        self.queue_dtype = queue_dtype_t
         self.queue = RingQueue(
-            dim=projector_q.output_dim, size=queue_size, device="cpu"
+            dim=projector_q.output_dim,
+            size=queue_size,
+            device=self.queue_device,
+            dtype=self.queue_dtype,
         )
         self.temperature = float(temperature)
         self.do_normalize = bool(normalize)
         self.cross_rank_queue = bool(cross_rank_queue)
+        self.loss_force_fp32 = bool(loss_fp32)
 
     def on_train_start(self) -> None:
         self.updater.copy_params()
@@ -68,7 +94,8 @@ class MoCo(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         q, k = proj
-        queue_keys = self._queue_keys(k)
+        queue_keys_raw = self._queue_keys(k)
+        queue_keys = self._format_queue_keys(queue_keys_raw)
         seeded_queue = False
         if len(self.queue) == 0:
             self.queue.enqueue(queue_keys)
@@ -104,18 +131,17 @@ class MoCo(BaseMethod):
         if q.shape != k.shape or q.ndim != 2:
             raise ValueError("q and k must be 2D tensors with identical shapes")
 
-        qf = q.to(torch.float32)
-        kf = k.detach().to(torch.float32)
+        compute_dtype = torch.float32 if self.loss_force_fp32 else q.dtype
+        qf = q.to(compute_dtype)
+        kf = k.detach().to(compute_dtype)
         if self.do_normalize:
             qf = F.normalize(qf, dim=1)
             kf = F.normalize(kf, dim=1)
 
         if negatives.numel() > 0:
             negf = negatives.detach().to(
-                device=q.device, dtype=torch.float32, non_blocking=True
+                device=q.device, dtype=compute_dtype, non_blocking=True
             )
-            if self.do_normalize:
-                negf = F.normalize(negf, dim=1)
         else:
             negf = qf.new_empty((0, qf.size(1)))
 
@@ -130,6 +156,8 @@ class MoCo(BaseMethod):
         logits = torch.cat([pos, neg_logits], dim=1) / self.temperature
         labels = torch.zeros(qf.size(0), dtype=torch.long, device=q.device)
         loss = F.cross_entropy(logits, labels)
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         stats: Dict[str, torch.Tensor] = {
             "pos_sim": pos.mean().detach(),
@@ -138,10 +166,19 @@ class MoCo(BaseMethod):
         return loss, stats
 
     def _queue_keys(self, k: torch.Tensor) -> torch.Tensor:
-        keys = k.detach().to(torch.float32)
+        gather_dtype = torch.float32 if self.loss_force_fp32 else k.dtype
+        keys = k.detach().to(gather_dtype)
         if self.cross_rank_queue and dist_utils.get_world_size() > 1:
             keys = dist_utils.all_gather_tensor(keys)
         return keys.cpu()
+
+    def _format_queue_keys(self, keys: torch.Tensor) -> torch.Tensor:
+        formatted = keys.to(device=self.queue_device)
+        if self.do_normalize:
+            formatted = F.normalize(formatted, dim=1)
+        if formatted.dtype != self.queue_dtype:
+            formatted = formatted.to(dtype=self.queue_dtype)
+        return formatted
 
 
 __all__ = ["MoCo"]
