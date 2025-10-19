@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -27,7 +26,6 @@ from mfcl.utils.dist import (
     is_main_process,
     unwrap_ddp,
 )
-from mfcl.utils.provenance import collect_provenance, write_provenance
 from mfcl.utils.seed import set_seed
 
 
@@ -281,30 +279,24 @@ def _hydra_entry(cfg: DictConfig) -> None:
             resume = latest
 
     if provenance_enabled and save_dir and is_main_process():
-        prov_path = Path(save_dir) / "provenance" / "repro.json"
+        from mfcl.utils.provenance import (
+            append_event,
+            collect_provenance,
+            write_stable_manifest_once,
+        )
+
+        prov_dir = Path(save_dir) / "provenance"
         snapshot = collect_provenance(plain_cfg)
-        snapshot.setdefault("events", [])
-        snapshot["program"] = "train"
-        snapshot["argv"] = list(sys.argv)
-        snapshot["cwd"] = os.getcwd()
-        resume_event: Dict[str, Any] = {
+        write_stable_manifest_once(prov_dir, snapshot)
+        event: Dict[str, Any] = {
+            "program": "train",
+            "argv": list(sys.argv),
+            "cwd": os.getcwd(),
             "type": "resume" if resume else "start",
         }
         if resume:
-            resume_event["resumed_from"] = str(resume)
-        snapshot["events"].append(resume_event)
-        history: list[Dict[str, Any]] = []
-        if resume and prov_path.exists():
-            try:
-                existing = json.loads(prov_path.read_text(encoding="utf-8"))
-                if isinstance(existing, dict):
-                    prev = existing.get("history")
-                    if isinstance(prev, list):
-                        history = [item for item in prev if isinstance(item, dict)]
-            except Exception:
-                history = []
-        history.append(snapshot)
-        write_provenance(prov_path, {"history": history})
+            event["resumed_from"] = str(resume)
+        append_event(prov_dir, event)
 
     trainer = Trainer(
         method,

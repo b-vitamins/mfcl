@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -19,7 +18,6 @@ from mfcl.engines.evaluator import LinearProbe
 from mfcl.transforms.common import to_tensor_and_norm
 from mfcl.utils.checkpoint import load_checkpoint
 from mfcl.utils.dist import is_main_process
-from mfcl.utils.provenance import collect_provenance, write_provenance
 from mfcl.utils.seed import set_seed
 
 
@@ -163,30 +161,27 @@ def _hydra_entry(cfg: DictConfig) -> None:
     if not os.path.exists(str(ckpt)):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
-    if provenance_enabled and conf.train.save_dir and is_main_process():
-        prov_path = Path(conf.train.save_dir) / "provenance" / "repro.json"
+    if provenance_enabled and is_main_process():
+        from mfcl.utils.provenance import (
+            append_event,
+            collect_provenance,
+            write_stable_manifest_once,
+        )
+
+        base_dir = Path(conf.train.save_dir) if conf.train.save_dir else Path(str(ckpt)).resolve().parent
+        prov_dir = base_dir / "provenance"
         snapshot = collect_provenance(plain_cfg)
-        snapshot.setdefault("events", [])
-        snapshot["program"] = "eval"
-        snapshot["argv"] = list(sys.argv)
-        snapshot["cwd"] = os.getcwd()
-        resume_event: Dict[str, Any] = {
-            "type": "resume",
-            "resumed_from": str(ckpt),
-        }
-        snapshot["events"].append(resume_event)
-        history: list[Dict[str, Any]] = []
-        if prov_path.exists():
-            try:
-                existing = json.loads(prov_path.read_text(encoding="utf-8"))
-                if isinstance(existing, dict):
-                    prev = existing.get("history")
-                    if isinstance(prev, list):
-                        history = [item for item in prev if isinstance(item, dict)]
-            except Exception:
-                history = []
-        history.append(snapshot)
-        write_provenance(prov_path, {"history": history})
+        write_stable_manifest_once(prov_dir, snapshot)
+        append_event(
+            prov_dir,
+            {
+                "program": "eval",
+                "argv": list(sys.argv),
+                "cwd": os.getcwd(),
+                "type": "resume",
+                "resumed_from": str(ckpt),
+            },
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
