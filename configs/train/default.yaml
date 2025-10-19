@@ -5,5 +5,12 @@ amp: true
 grad_clip: null
 save_dir: ${hydra:run.dir}
 seed: 42
-log_interval: 1
+log_interval: 50
+channels_last: false
+prefetch_gpu: false
+gpu_augment: false
+prefetch_depth: 1
+loss_fp32: true
+cudnn_bench: true
+compile: false
 scheduler_step_on: batch

@@ -8,6 +8,10 @@ batch_size: 32
 shuffle: true
 pin_memory: false
 persistent_workers: false
+prefetch_factor: 2
+multiprocessing_context: null
+worker_threads: 1
+pin_memory_device: cuda
 drop_last: true
 synthetic_num_classes: 100
 synthetic_train_size: 2048

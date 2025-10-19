@@ -31,6 +31,10 @@ class DataConfig:
     shuffle: bool = True
     pin_memory: bool = True
     persistent_workers: bool = True
+    prefetch_factor: int = 2
+    multiprocessing_context: str | None = None
+    worker_threads: int = 1
+    pin_memory_device: str | None = "cuda"
     drop_last: bool = True
     synthetic_num_classes: int = 1000
     synthetic_train_size: int = 2048
@@ -50,6 +54,7 @@ class AugConfig:
     gray_prob: float = 0.2
     solarize_prob: float = 0.0
     solarize_threshold: int = 128
+    backend: str = "cpu"
 
 
 @dataclass
@@ -73,6 +78,8 @@ class MethodConfig:
     temperature: float = 0.1
     moco_momentum: float = 0.999
     moco_queue: int = 65536
+    moco_queue_device: str = "cpu"
+    moco_queue_dtype: str = "fp32"
     byol_tau_base: float = 0.996
     byol_tau_final: float = 0.996
     byol_momentum_schedule: str = "const"
@@ -115,7 +122,14 @@ class TrainConfig:
     grad_clip: float | None = None
     save_dir: str = "runs/simclr_r18_160"
     seed: int = 42
-    log_interval: int = 1  # batches
+    log_interval: int = 50  # batches
+    channels_last: bool = False
+    prefetch_gpu: bool = False
+    gpu_augment: bool = False
+    prefetch_depth: int = 1
+    loss_fp32: bool = True
+    cudnn_bench: bool = True
+    compile: bool = False
     # Reserved for trainer control; factory is agnostic to step granularity.
     scheduler_step_on: str = "epoch"
 
@@ -150,8 +164,19 @@ def validate(cfg: Config) -> None:
         raise ValueError("data.batch_size must be > 0")
     if cfg.data.num_workers < 0:
         raise ValueError("data.num_workers must be >= 0")
+    if cfg.data.prefetch_factor <= 0:
+        raise ValueError("data.prefetch_factor must be > 0")
+    if cfg.data.worker_threads <= 0:
+        raise ValueError("data.worker_threads must be > 0")
+    pin_mem_dev = getattr(cfg.data, "pin_memory_device", None)
+    if pin_mem_dev is not None and not isinstance(pin_mem_dev, str):
+        raise ValueError("data.pin_memory_device must be a string or null")
     if cfg.aug.img_size < 64:
         raise ValueError("aug.img_size must be >= 64")
+
+    aug_backend = getattr(cfg.aug, "backend", "cpu").lower()
+    if aug_backend not in {"cpu", "tv2"}:
+        raise ValueError("aug.backend must be 'cpu' or 'tv2'")
 
     if dataset_kind == "synthetic":
         if cfg.data.synthetic_num_classes <= 0:
@@ -171,16 +196,33 @@ def validate(cfg: Config) -> None:
         raise ValueError("train.epochs must be > 0")
     if cfg.train.grad_clip is not None and cfg.train.grad_clip <= 0:
         raise ValueError("train.grad_clip must be > 0 when set")
+    if getattr(cfg.train, "prefetch_depth", 1) <= 0:
+        raise ValueError("train.prefetch_depth must be > 0")
+    if getattr(cfg.train, "gpu_augment", False) not in {True, False}:
+        raise ValueError("train.gpu_augment must be boolean")
+    if getattr(cfg.train, "loss_fp32", True) not in {True, False}:
+        raise ValueError("train.loss_fp32 must be boolean")
+    if getattr(cfg.train, "cudnn_bench", True) not in {True, False}:
+        raise ValueError("train.cudnn_bench must be boolean")
 
     if hasattr(cfg.train, "scheduler_step_on"):
         if cfg.train.scheduler_step_on not in {"batch", "epoch"}:
             raise ValueError("train.scheduler_step_on must be 'batch' or 'epoch'")
+
+    if aug_backend != "cpu" and not getattr(cfg.train, "gpu_augment", False):
+        raise ValueError("train.gpu_augment must be true when aug.backend != 'cpu'")
 
     valid_methods = {"simclr", "moco", "byol", "simsiam", "swav", "barlow", "vicreg"}
     if cfg.method.name not in valid_methods:
         raise ValueError("method.name must be one of simclr|moco|byol|simsiam|swav|barlow|vicreg")
 
     method_name = cfg.method.name.lower()
+    queue_device = getattr(cfg.method, "moco_queue_device", "cpu").lower()
+    if queue_device not in {"cpu", "cuda"}:
+        raise ValueError("method.moco_queue_device must be 'cpu' or 'cuda'")
+    queue_dtype = getattr(cfg.method, "moco_queue_dtype", "fp32").lower()
+    if queue_dtype not in {"fp32", "float32", "fp16", "float16"}:
+        raise ValueError("method.moco_queue_dtype must be fp32/float32 or fp16/float16")
     if method_name == "swav" and cfg.aug.global_crops < 2:
         raise ValueError("aug.global_crops must be >= 2 for method.swav")
     if method_name != "swav" and cfg.aug.local_crops > 0:

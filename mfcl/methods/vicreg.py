@@ -24,12 +24,18 @@ class VICReg(BaseMethod):
         nu_cov: float = 1.0,
         gamma: float = 1.0,
         eps: float = 1e-4,
+        loss_fp32: bool = True,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.projector = projector
         self.loss_fn = VICRegLoss(
-            lambda_inv=lambda_inv, mu_var=mu_var, nu_cov=nu_cov, gamma=gamma, eps=eps
+            lambda_inv=lambda_inv,
+            mu_var=mu_var,
+            nu_cov=nu_cov,
+            gamma=gamma,
+            eps=eps,
+            force_fp32=loss_fp32,
         )
 
     def forward_views(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:

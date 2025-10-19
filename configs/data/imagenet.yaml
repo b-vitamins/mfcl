@@ -8,4 +8,8 @@ batch_size: 256
 shuffle: true
 pin_memory: true
 persistent_workers: true
+prefetch_factor: 2
+multiprocessing_context: null
+worker_threads: 1
+pin_memory_device: cuda
 drop_last: true

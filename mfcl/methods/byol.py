@@ -32,6 +32,7 @@ class BYOL(BaseMethod):
         momentum_schedule_steps: int | None = None,
         normalize: bool = True,
         variant: str = "cosine",
+        loss_fp32: bool = True,
     ) -> None:
         """Construct BYOL.
 
@@ -80,7 +81,11 @@ class BYOL(BaseMethod):
         self._schedule_steps = momentum_schedule_steps
         self._optimizer_steps = 0
         self._current_momentum = float(tau_base)
-        self.loss_fn = BYOLLoss(normalize=normalize, variant=variant)
+        self.loss_fn = BYOLLoss(
+            normalize=normalize,
+            variant=variant,
+            force_fp32=loss_fp32,
+        )
 
     def on_train_start(self) -> None:
         self.updater.copy_params()

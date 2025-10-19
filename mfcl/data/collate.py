@@ -10,23 +10,27 @@ import torch
 def collate_pair(
     batch: List[Tuple[Dict[str, torch.Tensor], int]],
 ) -> Dict[str, torch.Tensor]:
-    """Collate a batch of two-view dicts.
+    """Collate a batch of two-view dicts or GPU-ready single images."""
 
-    Args:
-        batch: List of (sample_dict, idx). sample_dict has keys {'view1','view2'}.
-
-    Returns:
-        {'view1': Tensor[B,3,H,W], 'view2': Tensor[B,3,H,W], 'index': Tensor[B]}
-    """
-    v1 = [sample["view1"] for sample, _ in batch]
-    v2 = [sample["view2"] for sample, _ in batch]
+    if not batch:
+        raise ValueError("batch must contain at least one element")
+    sample0, _ = batch[0]
     idxs = [int(idx) for _, idx in batch]
-    out = {
-        "view1": torch.stack(v1, dim=0),
-        "view2": torch.stack(v2, dim=0),
-        "index": torch.tensor(idxs, dtype=torch.long),
-    }
-    return out
+    if "view1" in sample0 and "view2" in sample0:
+        v1 = [sample["view1"] for sample, _ in batch]
+        v2 = [sample["view2"] for sample, _ in batch]
+        return {
+            "view1": torch.stack(v1, dim=0),
+            "view2": torch.stack(v2, dim=0),
+            "index": torch.tensor(idxs, dtype=torch.long),
+        }
+    if "image" in sample0:
+        images = [sample["image"] for sample, _ in batch]
+        return {
+            "image": torch.stack(images, dim=0),
+            "index": torch.tensor(idxs, dtype=torch.long),
+        }
+    raise KeyError("Expected keys 'view1'/'view2' or 'image' in samples")
 
 class MultiCropSample(TypedDict):
     crops: List[torch.Tensor]
@@ -40,28 +44,17 @@ class MultiCropBatch(TypedDict):
 
 
 def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCropBatch:
-    """Collate a batch of multi-crop samples.
+    """Collate a batch of multi-crop samples or GPU-ready base images."""
 
-    Args:
-        batch: List of (sample_dict, idx) where sample_dict has:
-               - 'crops': List[Tensor[C,Hc,Wc]] length Cn
-               - 'code_crops': Tuple[int,int]
-
-    Returns:
-        {
-          'crops': List[Tensor[B,3,Hc,Wc]] aligned per crop position,
-          'code_crops': Tuple[int,int],
-          'index': Tensor[B]
-        }
-
-    Notes:
-        - Assumes that for all items, the number of crops and their spatial sizes
-          by position are identical (enforced by the transform builder).
-    """
     if not batch:
         raise ValueError("batch must contain at least one element")
 
     first, _ = batch[0]
+    if "image" in first:
+        images = [sample["image"] for sample, _ in batch]
+        idxs = torch.tensor([int(idx) for _, idx in batch], dtype=torch.long)
+        return {"image": torch.stack(images, dim=0), "index": idxs}
+
     f = cast(MultiCropSample, first)
     crops0 = f.get("crops")
     if not isinstance(crops0, list):

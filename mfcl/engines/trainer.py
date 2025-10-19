@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, Optional, Iterable
+from typing import Any, Dict, Optional, Iterable, Callable
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import LRScheduler as SchedulerBase  # type: ignore
@@ -62,6 +62,8 @@ class Trainer:
         clip_grad: Optional[float] = None,
         scheduler_step_on: str = "batch",
         guard_grad_nan: bool = False,
+        channels_last_inputs: bool = False,
+        gpu_augmentor: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -80,6 +82,8 @@ class Trainer:
             clip_grad: Max norm for gradient clipping (None disables).
             scheduler_step_on: Step scheduler per 'batch' or per 'epoch'.
             guard_grad_nan: If True, raise when gradients contain NaN or Inf.
+            gpu_augmentor: Optional callable applied to batches after to_device to
+                populate view tensors (used for GPU-side augmentation).
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -104,10 +108,19 @@ class Trainer:
             raise ValueError("scheduler_step_on must be 'batch' or 'epoch'")
         self.scheduler_step_on = scheduler_step_on
         self.guard_grad_nan = bool(guard_grad_nan)
+        self.channels_last_inputs = bool(channels_last_inputs)
+        self._gpu_augmentor = gpu_augmentor
 
-        unwrap_ddp(self.method).to(self.device)
+        base_method = unwrap_ddp(self.method)
+        base_method.to(self.device)
+        if self.channels_last_inputs:
+            try:
+                base_method.to(memory_format=torch.channels_last)
+            except (TypeError, RuntimeError):
+                pass
         # Global step counts processed micro-batches across the lifetime of the trainer
         self._global_step = 0
+        self._last_move_bytes = 0
 
     def fit(
         self,
@@ -232,9 +245,27 @@ class Trainer:
             except Exception:
                 pass
 
-        for step, batch in enumerate(loader):
+        iterator = iter(loader)
+        step = 0
+        prev_end = time.time()
+        data_time_total = 0.0
+        compute_time_total = 0.0
+        h2d_bytes_total = 0.0
+
+        while True:
+            data_start = prev_end
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
             batch = self.to_device(batch)
-            step_start = time.time()
+            after_move = time.time()
+            data_elapsed = after_move - data_start
+            data_time_total += data_elapsed
+            h2d_bytes_total += float(self._last_move_bytes)
+            if self._gpu_augmentor is not None:
+                batch = self._gpu_augmentor(batch)
+            compute_start = time.time()
             with self.scaler.autocast():
                 stats = self.method(batch)
                 if "loss" not in stats:
@@ -261,7 +292,10 @@ class Trainer:
                 last_lr = self._apply_optimizer_step(self.accum_steps)
 
             # Update meters and console
-            dt = time.time() - step_start
+            step_end = time.time()
+            compute_elapsed = step_end - compute_start
+            compute_time_total += compute_elapsed
+            dt = step_end - data_start
             time_meter.update(dt)
             batch_size = self._infer_batch_size(batch)
             if batch_size > 0 and dt > 0:
@@ -274,6 +308,8 @@ class Trainer:
             hook_metrics = self._stats_to_floats(stats)
             hook_metrics.setdefault("loss", float(loss.detach().to(torch.float32).item()))
             hook_metrics.setdefault("lr", float(last_lr))
+            hook_metrics.setdefault("data_time", data_elapsed)
+            hook_metrics.setdefault("compute_time", compute_elapsed)
             self.hooks.on_batch_end(self._global_step, hook_metrics)
 
             should_tail = (total > 0 and step == total - 1)
@@ -316,6 +352,9 @@ class Trainer:
                         "neg_sim_mean",
                     ),
                 )
+
+            prev_end = step_end
+            step += 1
 
         # Flush gradients if the final micro-batch count does not evenly divide the
         # accumulation factor. Without this step, the trailing micro-batches would
@@ -360,6 +399,10 @@ class Trainer:
                 summary_metrics["imgs_per_sec"] = samples_seen / epoch_time
             if global_epoch_time > 0 and global_samples > 0:
                 summary_metrics["global_imgs_per_sec"] = global_samples / global_epoch_time
+            if count > 0:
+                summary_metrics["data_time"] = data_time_total / count
+                summary_metrics["compute_time"] = compute_time_total / count
+                summary_metrics["h2d_mb_per_step"] = (h2d_bytes_total / count) / (1024 ** 2)
             self.console.summary(epoch, summary_metrics)
 
         return {
@@ -369,6 +412,11 @@ class Trainer:
             "imgs_per_sec": float(samples_seen / epoch_time) if epoch_time > 0 else 0.0,
             "global_imgs_per_sec": float(global_samples / global_epoch_time)
             if global_epoch_time > 0
+            else 0.0,
+            "data_time": data_time_total / count if count > 0 else 0.0,
+            "compute_time": compute_time_total / count if count > 0 else 0.0,
+            "h2d_mb_per_step": (h2d_bytes_total / count) / (1024 ** 2)
+            if count > 0
             else 0.0,
         }
 
@@ -450,25 +498,41 @@ class Trainer:
 
     def to_device(self, obj: Any) -> Any:
         """Recursively move tensors in obj to self.device."""
-        if torch.is_tensor(obj):
-            return obj.to(self.device, non_blocking=True)
-        if isinstance(obj, dict):
-            return {k: self.to_device(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            seq = [self.to_device(x) for x in obj]
-            if isinstance(obj, tuple):
-                # Preserve namedtuple types if possible
-                try:
-                    if hasattr(obj, "_fields"):
-                        return type(obj)(*seq)
-                    return type(obj)(seq)
-                except TypeError:
+        bytes_moved = 0
+
+        def _move(item: Any) -> Any:
+            nonlocal bytes_moved
+            if torch.is_tensor(item):
+                if item.device != self.device:
+                    bytes_moved += item.element_size() * item.numel()
+                tensor = item.to(self.device, non_blocking=True)
+                if (
+                    self.channels_last_inputs
+                    and tensor.ndim == 4
+                    and tensor.is_floating_point()
+                ):
+                    tensor = tensor.contiguous(memory_format=torch.channels_last)
+                return tensor
+            if isinstance(item, dict):
+                return {k: _move(v) for k, v in item.items()}
+            if isinstance(item, (list, tuple)):
+                seq = [_move(x) for x in item]
+                if isinstance(item, tuple):
                     try:
-                        return type(obj)(*seq)
+                        if hasattr(item, "_fields"):
+                            return type(item)(*seq)
+                        return type(item)(seq)
                     except TypeError:
-                        return tuple(seq)
-            return seq
-        return obj
+                        try:
+                            return type(item)(*seq)
+                        except TypeError:
+                            return tuple(seq)
+                return seq
+            return item
+
+        result = _move(obj)
+        self._last_move_bytes = bytes_moved
+        return result
 
     @staticmethod
     def _infer_batch_size(batch: Any) -> int:

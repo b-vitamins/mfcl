@@ -20,6 +20,7 @@ class SwAVLoss(nn.Module):
         use_float32_for_sinkhorn: bool = True,
         sinkhorn_tol: float = 1e-3,
         sinkhorn_max_iters: int = 100,
+        force_fp32: bool = True,
         **_: dict,
     ) -> None:
         """Initialize SwAV loss.
@@ -42,6 +43,7 @@ class SwAVLoss(nn.Module):
         self.iters = int(sinkhorn_iters)
         self.temp = float(temperature)
         self.fp32_sinkhorn = bool(use_float32_for_sinkhorn)
+        self.force_fp32 = bool(force_fp32)
         if sinkhorn_tol <= 0:
             raise ValueError("sinkhorn_tol must be > 0")
         if sinkhorn_max_iters < 1:
@@ -148,8 +150,9 @@ class SwAVLoss(nn.Module):
         q_max_mean = 0.5 * (Qa.max(dim=1).values.mean() + Qb.max(dim=1).values.mean())
 
         # Predict assignments from other crops
+        target_dtype = torch.float32 if self.force_fp32 else logits_per_crop[0].dtype
         logp_per_crop = [
-            F.log_softmax(logits.to(torch.float32) / self.temp, dim=1)
+            F.log_softmax(logits.to(target_dtype) / self.temp, dim=1)
             for logits in logits_per_crop
         ]
         losses = []
@@ -163,6 +166,8 @@ class SwAVLoss(nn.Module):
         if not losses:
             raise ValueError("Not enough crops to compute SwAV loss")
         loss = torch.stack(losses, dim=0).mean()
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
 
         stats = {"entropy": q_stats_entropy.detach(), "q_max_mean": q_max_mean.detach()}
         return loss, stats
