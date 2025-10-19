@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -9,7 +10,6 @@ import platform
 import socket
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
@@ -24,12 +24,6 @@ except Exception:  # pragma: no cover - numpy optional
     np = None  # type: ignore
 
 from mfcl.utils.dist import get_local_rank, get_rank, get_world_size
-
-
-def _iso_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-
 def _run_git_command(args: Iterable[str]) -> str:
     try:
         out = subprocess.check_output(list(args), stderr=subprocess.STDOUT)
@@ -359,7 +353,6 @@ def collect_provenance(run_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     git_info, git_diff = _collect_git()
     snapshot: Dict[str, Any] = {
-        "collected_at": _iso_now(),
         "git": git_info,
         "runtime": _collect_runtime(),
         "hardware": _collect_hardware(),
@@ -375,12 +368,37 @@ def collect_provenance(run_cfg: Dict[str, Any]) -> Dict[str, Any]:
         snapshot.setdefault("git", {}).setdefault("diff", "")
     return snapshot
 
+def _canonicalize_snapshot(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    clean = copy.deepcopy(snapshot)
+    if not isinstance(clean, dict):
+        clean = dict(clean)
+    clean.pop("collected_at", None)
+    events = clean.get("events")
+    if isinstance(events, list):
+        normalized_events: List[Dict[str, Any]] = []
+        for event in events:
+            if isinstance(event, Mapping):
+                event_copy = copy.deepcopy(event)
+                if not isinstance(event_copy, dict):
+                    event_copy = dict(event_copy)
+                event_copy.pop("time", None)
+                normalized_events.append(event_copy)
+        clean["events"] = normalized_events
+    return clean
+
 
 def write_provenance(path: Path, data: Dict[str, Any]) -> None:
     """Write provenance JSON and companion artifacts to disk."""
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    history = data.get("history")
+    if isinstance(history, list):
+        canonical_history: List[Dict[str, Any]] = []
+        for entry in history:
+            if isinstance(entry, Mapping):
+                canonical_history.append(_canonicalize_snapshot(entry))
+        history[:] = canonical_history
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")

@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
@@ -164,7 +163,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     if not os.path.exists(str(ckpt)):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
-    if provenance_enabled and conf.train.save_dir:
+    if provenance_enabled and conf.train.save_dir and is_main_process():
         prov_path = Path(conf.train.save_dir) / "provenance" / "repro.json"
         snapshot = collect_provenance(plain_cfg)
         snapshot.setdefault("events", [])
@@ -173,7 +172,6 @@ def _hydra_entry(cfg: DictConfig) -> None:
         snapshot["cwd"] = os.getcwd()
         resume_event: Dict[str, Any] = {
             "type": "resume",
-            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "resumed_from": str(ckpt),
         }
         snapshot["events"].append(resume_event)
