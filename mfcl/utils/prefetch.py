@@ -80,10 +80,13 @@ class PrefetchLoader(Iterable[Any]):
         return self
 
     def __next__(self) -> Any:
-        if self._iterator is None:
-            raise RuntimeError("PrefetchLoader was not iterated")
         if not self._queue:
-            raise StopIteration
+            if self._iterator is None:
+                if not self._streams:
+                    raise RuntimeError("PrefetchLoader was not iterated")
+                raise StopIteration
+            if not self._preload():
+                raise StopIteration
         stream, batch = self._queue.popleft()
         torch.cuda.current_stream(self.device).wait_stream(stream)  # type: ignore[arg-type]
         self._preload()
