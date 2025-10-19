@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from mfcl.utils.provenance import collect_provenance, write_provenance
+from mfcl.utils.provenance import (
+    append_event,
+    collect_provenance,
+    write_provenance,
+    write_stable_manifest_once,
+)
 
 
 def _repo_root() -> Path:
@@ -23,6 +28,26 @@ def test_roundtrip_json(tmp_path):
     write_provenance(out_path, payload)
     loaded = json.loads(out_path.read_text(encoding="utf-8"))
     assert loaded == payload
+
+
+def test_manifest_and_events(tmp_path):
+    prov_dir = tmp_path / "provenance"
+    snapshot = collect_provenance({})
+    write_stable_manifest_once(prov_dir, snapshot)
+    write_stable_manifest_once(prov_dir, {"different": True})
+    repro_path = prov_dir / "repro.json"
+    stored = json.loads(repro_path.read_text(encoding="utf-8"))
+    assert stored == snapshot
+
+    append_event(prov_dir, {"type": "start", "program": "train"})
+    append_event(prov_dir, {"type": "start", "program": "train"})
+    events_path = prov_dir / "events.jsonl"
+    lines = [line for line in events_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) == 2
+    first_event = json.loads(lines[0])
+    assert first_event["type"] == "start"
+    assert first_event["program"] == "train"
+    assert "time" in first_event
 
 
 def test_git_info_present(tmp_path):

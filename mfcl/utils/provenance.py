@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -10,6 +9,7 @@ import platform
 import socket
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
@@ -24,6 +24,15 @@ except Exception:  # pragma: no cover - numpy optional
     np = None  # type: ignore
 
 from mfcl.utils.dist import get_local_rank, get_rank, get_world_size
+
+
+def _iso_now() -> str:
+    """Return the current UTC time in ISO-8601 format without microseconds."""
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    return now.isoformat().replace("+00:00", "Z")
+
+
 def _run_git_command(args: Iterable[str]) -> str:
     try:
         out = subprocess.check_output(list(args), stderr=subprocess.STDOUT)
@@ -349,9 +358,9 @@ def _collect_diagnostics(cfg: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def collect_provenance(run_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Collect a provenance snapshot for the current process."""
+    """Collect a deterministic provenance snapshot for the current process."""
 
-    git_info, git_diff = _collect_git()
+    git_info, _ = _collect_git()
     snapshot: Dict[str, Any] = {
         "git": git_info,
         "runtime": _collect_runtime(),
@@ -362,29 +371,7 @@ def collect_provenance(run_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "diagnostics": _collect_diagnostics(run_cfg or {}),
         "run_config": run_cfg,
     }
-    if git_diff:
-        snapshot.setdefault("git", {})["diff"] = git_diff
-    else:
-        snapshot.setdefault("git", {}).setdefault("diff", "")
     return snapshot
-
-def _canonicalize_snapshot(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
-    clean = copy.deepcopy(snapshot)
-    if not isinstance(clean, dict):
-        clean = dict(clean)
-    clean.pop("collected_at", None)
-    events = clean.get("events")
-    if isinstance(events, list):
-        normalized_events: List[Dict[str, Any]] = []
-        for event in events:
-            if isinstance(event, Mapping):
-                event_copy = copy.deepcopy(event)
-                if not isinstance(event_copy, dict):
-                    event_copy = dict(event_copy)
-                event_copy.pop("time", None)
-                normalized_events.append(event_copy)
-        clean["events"] = normalized_events
-    return clean
 
 
 def write_provenance(path: Path, data: Dict[str, Any]) -> None:
@@ -392,24 +379,10 @@ def write_provenance(path: Path, data: Dict[str, Any]) -> None:
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    history = data.get("history")
-    if isinstance(history, list):
-        canonical_history: List[Dict[str, Any]] = []
-        for entry in history:
-            if isinstance(entry, Mapping):
-                canonical_history.append(_canonicalize_snapshot(entry))
-        history[:] = canonical_history
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
-    latest_diff = ""
-    history = data.get("history") if isinstance(data, Mapping) else None
-    if isinstance(history, list) and history:
-        latest = history[-1]
-        if isinstance(latest, Mapping):
-            latest_diff = str(latest.get("git", {}).get("diff", ""))
-    else:
-        latest_diff = str(data.get("git", {}).get("diff", ""))
+    _, latest_diff = _collect_git()
     diff_path = path.parent / "git.diff"
     diff_path.write_text(latest_diff, encoding="utf-8")
     env_lines = [f"{key}={value}" for key, value in sorted(os.environ.items())]
@@ -417,4 +390,32 @@ def write_provenance(path: Path, data: Dict[str, Any]) -> None:
     env_path.write_text("\n".join(env_lines) + ("\n" if env_lines else ""), encoding="utf-8")
 
 
-__all__ = ["collect_provenance", "write_provenance"]
+def append_event(prov_dir: Path, event: Dict[str, Any]) -> None:
+    """Append a time-stamped event to provenance/events.jsonl."""
+
+    prov_dir = Path(prov_dir)
+    prov_dir.mkdir(parents=True, exist_ok=True)
+    event_copy: Dict[str, Any] = dict(event)
+    event_copy.setdefault("time", _iso_now())
+    events_path = prov_dir / "events.jsonl"
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event_copy, sort_keys=True) + "\n")
+
+
+def write_stable_manifest_once(prov_dir: Path, snapshot: Dict[str, Any]) -> None:
+    """Write repro.json once; subsequent calls are no-ops."""
+
+    prov_dir = Path(prov_dir)
+    prov_dir.mkdir(parents=True, exist_ok=True)
+    repro_path = prov_dir / "repro.json"
+    if repro_path.exists():
+        return
+    write_provenance(repro_path, snapshot)
+
+
+__all__ = [
+    "collect_provenance",
+    "write_provenance",
+    "append_event",
+    "write_stable_manifest_once",
+]
