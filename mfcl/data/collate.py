@@ -9,7 +9,7 @@ import torch
 
 def collate_pair(
     batch: List[Tuple[Dict[str, torch.Tensor], int]],
-) -> Dict[str, torch.Tensor]:
+) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
     """Collate a batch of two-view dicts or GPU-ready single images."""
 
     if not batch:
@@ -27,7 +27,7 @@ def collate_pair(
     if "image" in sample0:
         images = [sample["image"] for sample, _ in batch]
         return {
-            "image": torch.stack(images, dim=0),
+            "image": images,
             "index": torch.tensor(idxs, dtype=torch.long),
         }
     raise KeyError("Expected keys 'view1'/'view2' or 'image' in samples")
