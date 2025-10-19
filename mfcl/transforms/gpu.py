@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 import torch
 
@@ -52,14 +52,24 @@ def build_gpu_multicrop_pretransform(cfg: AugConfig) -> Callable[[Any], Dict[str
     return _transform
 
 
-def _apply_pipeline(inputs: torch.Tensor, pipeline: v2.Transform) -> torch.Tensor:
+def _apply_pipeline(
+    inputs: torch.Tensor | Sequence[torch.Tensor],
+    pipeline: v2.Transform,
+) -> torch.Tensor:
     """Apply a torchvision v2 pipeline per-sample while preserving batch shape."""
 
-    if inputs.ndim == 3:
-        return pipeline(inputs)
-    if inputs.ndim != 4:
-        raise ValueError(f"Expected tensor with ndim 3 or 4, got {inputs.ndim}")
-    outputs = [pipeline(img) for img in inputs.unbind(0)]
+    if isinstance(inputs, torch.Tensor):
+        if inputs.ndim == 3:
+            return pipeline(inputs)
+        if inputs.ndim != 4:
+            raise ValueError(f"Expected tensor with ndim 3 or 4, got {inputs.ndim}")
+        iterable = inputs.unbind(0)
+    else:
+        iterable = inputs
+
+    outputs = [pipeline(img) for img in iterable]
+    if not outputs:
+        raise ValueError("_apply_pipeline received an empty batch")
     return torch.stack(outputs, dim=0)
 
 
