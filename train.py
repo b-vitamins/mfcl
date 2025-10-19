@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from typing import Callable, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, Sequence
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -25,6 +28,7 @@ from mfcl.utils.dist import (
     is_main_process,
     unwrap_ddp,
 )
+from mfcl.utils.provenance import collect_provenance, write_provenance
 from mfcl.utils.seed import set_seed
 
 
@@ -158,6 +162,26 @@ def _maybe_autofill_byol_schedule_steps(conf: Config, steps_per_epoch: int | Non
 def _hydra_entry(cfg: DictConfig) -> None:
     init_distributed()
     conf: Config = from_omegaconf(cfg)
+    try:
+        plain_cfg_obj = OmegaConf.to_container(cfg, resolve=True)  # type: ignore[arg-type]
+        plain_cfg: Dict[str, Any]
+        if isinstance(plain_cfg_obj, dict):
+            plain_cfg = plain_cfg_obj  # type: ignore[assignment]
+        else:
+            plain_cfg = {}
+    except Exception:
+        plain_cfg = {}
+    runtime_dict = plain_cfg.get("runtime") if isinstance(plain_cfg, dict) else {}
+    provenance_enabled = True
+    if isinstance(runtime_dict, dict):
+        provenance_enabled = bool(runtime_dict.get("provenance", True))
+    else:
+        try:
+            runtime_node = cfg.get("runtime")  # type: ignore[call-arg]
+            if runtime_node is not None and hasattr(runtime_node, "get"):
+                provenance_enabled = bool(runtime_node.get("provenance", True))
+        except Exception:
+            provenance_enabled = True
     validate(conf)
     if _CLI_FLAGS.get("print_config", False) and is_main_process():
         print(OmegaConf.to_yaml(cfg, resolve=True))
@@ -256,6 +280,33 @@ def _hydra_entry(cfg: DictConfig) -> None:
         latest = os.path.join(save_dir, "latest.pt")
         if os.path.exists(latest):
             resume = latest
+
+    if provenance_enabled and save_dir:
+        prov_path = Path(save_dir) / "provenance" / "repro.json"
+        snapshot = collect_provenance(plain_cfg)
+        snapshot.setdefault("events", [])
+        snapshot["program"] = "train"
+        snapshot["argv"] = list(sys.argv)
+        snapshot["cwd"] = os.getcwd()
+        resume_event: Dict[str, Any] = {
+            "type": "resume" if resume else "start",
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        if resume:
+            resume_event["resumed_from"] = str(resume)
+        snapshot["events"].append(resume_event)
+        history: list[Dict[str, Any]] = []
+        if resume and prov_path.exists():
+            try:
+                existing = json.loads(prov_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    prev = existing.get("history")
+                    if isinstance(prev, list):
+                        history = [item for item in prev if isinstance(item, dict)]
+            except Exception:
+                history = []
+        history.append(snapshot)
+        write_provenance(prov_path, {"history": history})
 
     trainer = Trainer(
         method,
