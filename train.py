@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Sequence
 
@@ -281,7 +280,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         if os.path.exists(latest):
             resume = latest
 
-    if provenance_enabled and save_dir:
+    if provenance_enabled and save_dir and is_main_process():
         prov_path = Path(save_dir) / "provenance" / "repro.json"
         snapshot = collect_provenance(plain_cfg)
         snapshot.setdefault("events", [])
@@ -290,7 +289,6 @@ def _hydra_entry(cfg: DictConfig) -> None:
         snapshot["cwd"] = os.getcwd()
         resume_event: Dict[str, Any] = {
             "type": "resume" if resume else "start",
-            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
         if resume:
             resume_event["resumed_from"] = str(resume)
