@@ -86,6 +86,7 @@ def _simclr_pipeline(cfg: AugConfig, size: int) -> v2.Transform:
         hue=0.1,
     )
     transforms: List[v2.Transform] = [
+        v2.ToDtype(torch.float32, scale=True),
         v2.RandomResizedCrop(
             size,
             scale=(0.08, 1.0),
@@ -112,12 +113,7 @@ def _simclr_pipeline(cfg: AugConfig, size: int) -> v2.Transform:
                 p=float(cfg.solarize_prob),
             )
         )
-    transforms.extend(
-        [
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=mean, std=std),
-        ]
-    )
+    transforms.append(v2.Normalize(mean=mean, std=std))
     return v2.Compose(transforms)
 
 
@@ -151,6 +147,7 @@ def _swav_pipeline(cfg: AugConfig, size: int, scale: Tuple[float, float]) -> v2.
         hue=0.1,
     )
     transforms: List[v2.Transform] = [
+        v2.ToDtype(torch.float32, scale=True),
         v2.RandomResizedCrop(size, scale=scale, ratio=(3 / 4, 4 / 3), antialias=True),
         v2.RandomHorizontalFlip(),
         v2.RandomApply([color], p=0.8),
@@ -172,12 +169,7 @@ def _swav_pipeline(cfg: AugConfig, size: int, scale: Tuple[float, float]) -> v2.
                 p=float(cfg.solarize_prob),
             )
         )
-    transforms.extend(
-        [
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=mean, std=std),
-        ]
-    )
+    transforms.append(v2.Normalize(mean=mean, std=std))
     return v2.Compose(transforms)
 
 
