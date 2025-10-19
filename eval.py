@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from typing import Sequence, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Sequence, Tuple
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -17,6 +20,7 @@ from mfcl.engines.evaluator import LinearProbe
 from mfcl.transforms.common import to_tensor_and_norm
 from mfcl.utils.checkpoint import load_checkpoint
 from mfcl.utils.dist import is_main_process
+from mfcl.utils.provenance import collect_provenance, write_provenance
 from mfcl.utils.seed import set_seed
 
 
@@ -127,6 +131,26 @@ _CLI_STATE: dict[str, object] = {"print_config": False, "checkpoint": None}
 @hydra.main(config_path="configs", config_name="config", version_base="1.3")
 def _hydra_entry(cfg: DictConfig) -> None:
     conf: Config = from_omegaconf(cfg)
+    try:
+        plain_cfg_obj = OmegaConf.to_container(cfg, resolve=True)  # type: ignore[arg-type]
+        plain_cfg: Dict[str, Any]
+        if isinstance(plain_cfg_obj, dict):
+            plain_cfg = plain_cfg_obj  # type: ignore[assignment]
+        else:
+            plain_cfg = {}
+    except Exception:
+        plain_cfg = {}
+    runtime_dict = plain_cfg.get("runtime") if isinstance(plain_cfg, dict) else {}
+    provenance_enabled = True
+    if isinstance(runtime_dict, dict):
+        provenance_enabled = bool(runtime_dict.get("provenance", True))
+    else:
+        try:
+            runtime_node = cfg.get("runtime")  # type: ignore[call-arg]
+            if runtime_node is not None and hasattr(runtime_node, "get"):
+                provenance_enabled = bool(runtime_node.get("provenance", True))
+        except Exception:
+            provenance_enabled = True
     validate(conf)
     if _CLI_STATE.get("print_config") and is_main_process():
         print(OmegaConf.to_yaml(cfg, resolve=True))
@@ -139,6 +163,32 @@ def _hydra_entry(cfg: DictConfig) -> None:
         raise FileNotFoundError("Provide checkpoint path via --checkpoint, MFCL_CKPT, or +checkpoint=/path/to/ckpt.pt")
     if not os.path.exists(str(ckpt)):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+
+    if provenance_enabled and conf.train.save_dir:
+        prov_path = Path(conf.train.save_dir) / "provenance" / "repro.json"
+        snapshot = collect_provenance(plain_cfg)
+        snapshot.setdefault("events", [])
+        snapshot["program"] = "eval"
+        snapshot["argv"] = list(sys.argv)
+        snapshot["cwd"] = os.getcwd()
+        resume_event: Dict[str, Any] = {
+            "type": "resume",
+            "time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "resumed_from": str(ckpt),
+        }
+        snapshot["events"].append(resume_event)
+        history: list[Dict[str, Any]] = []
+        if prov_path.exists():
+            try:
+                existing = json.loads(prov_path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    prev = existing.get("history")
+                    if isinstance(prev, list):
+                        history = [item for item in prev if isinstance(item, dict)]
+            except Exception:
+                history = []
+        history.append(snapshot)
+        write_provenance(prov_path, {"history": history})
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

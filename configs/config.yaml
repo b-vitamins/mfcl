@@ -8,6 +8,7 @@ defaults:
   - train: default
   - knn: disabled
   - linear: default
+  - runtime: default
   - _self_
 
 hydra:
