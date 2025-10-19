@@ -108,7 +108,7 @@ def test_provenance_repro_hash(tmp_path):
     base_cmd = [
         sys.executable,
         "train.py",
-        "data.name=synthetic",
+        "data=synthetic",
         "data.synthetic_train_size=80",
         "data.synthetic_val_size=80",
         "data.batch_size=8",
