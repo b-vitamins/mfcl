@@ -1,10 +1,11 @@
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
-
-from mfcl.utils import dist as dist_utils
 
 from mfcl.losses.ntxent import NTXentLoss
+from mfcl.mixture import MixtureStats
+from mfcl.mixture.context import _set_active_estimator
+from mfcl.utils import dist as dist_utils
 
 
 def test_ntxent_basic_and_temp():
@@ -116,3 +117,26 @@ def test_ntxent_cross_rank_two_n_matches_manual(monkeypatch):
     targets = torch.cat([idx + z1_all.shape[0], idx], dim=0)
     expected = F.cross_entropy(logits, targets)
     assert torch.allclose(loss, expected, atol=1e-6)
+
+
+def test_ntxent_updates_label_supervised_mixture():
+    estimator = MixtureStats(
+        K=3,
+        assigner="label_supervised",
+        mode="label_supervised",
+        enabled=True,
+    )
+    try:
+        _set_active_estimator(estimator)
+        loss_fn = NTXentLoss()
+        z1 = torch.randn(4, 8)
+        z2 = torch.randn(4, 8)
+        labels = torch.tensor([0, 1, 2, 1], dtype=torch.long)
+        loss, _ = loss_fn(z1, z2, labels=labels)
+        assert torch.isfinite(loss)
+        stored = estimator._last_stats  # type: ignore[attr-defined]
+        assert stored is not None
+        assert "pi" in stored and stored["pi"].numel() == estimator.K
+    finally:
+        _set_active_estimator(None)
+        estimator.close()

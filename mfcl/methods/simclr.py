@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -55,7 +55,13 @@ class SimCLR(BaseMethod):
         self, *proj: Any, batch: Dict[str, Any]
     ) -> Dict[str, torch.Tensor]:
         z1, z2 = proj
-        loss, stats = self.loss_fn(z1, z2)
+        label_tensor: Optional[torch.Tensor] = None
+        for key in ("mixture_labels", "target", "label", "labels"):
+            value = batch.get(key) if isinstance(batch, dict) else None
+            if torch.is_tensor(value):
+                label_tensor = value
+                break
+        loss, stats = self.loss_fn(z1, z2, labels=label_tensor)
         stats["loss"] = loss
         return stats
 

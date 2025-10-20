@@ -6,7 +6,7 @@ and the original 2N formulation contrasting across both views (2B−2 negatives)
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -62,13 +62,17 @@ class NTXentLoss(SelfSupervisedLoss):
         self.force_fp32 = bool(force_fp32)
 
     def forward(
-        self, z1: torch.Tensor, z2: torch.Tensor
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Compute symmetric NT-Xent.
 
         Args:
             z1: [B, D] projections for view 1.
             z2: [B, D] projections for view 2.
+            labels: Optional [B] tensor of class ids for mixture diagnostics.
 
         Returns:
             loss: Scalar tensor, mean over the batch. The loss uses mean reduction.
@@ -76,7 +80,7 @@ class NTXentLoss(SelfSupervisedLoss):
                     'neg_sim_mean': mean cosine over negatives}
 
         Raises:
-            ValueError: If batch size < 2 or shapes mismatch.
+            ValueError: If batch size < 2, shapes mismatch, or labels misalign with B.
 
         Notes:
             Similarities are computed in float32 for stability.
@@ -87,6 +91,18 @@ class NTXentLoss(SelfSupervisedLoss):
         if B < 2:
             raise ValueError("batch size must be >= 2 for NT-Xent")
 
+        prepared_labels: Optional[torch.Tensor] = None
+        if labels is not None:
+            if not torch.is_tensor(labels):
+                raise TypeError("labels must be a torch.Tensor when provided")
+            prepared_labels = labels
+            if prepared_labels.dim() != 1:
+                prepared_labels = prepared_labels.reshape(-1)
+            if prepared_labels.shape[0] != B:
+                raise ValueError("labels must have shape [B] to align with embeddings")
+            if prepared_labels.device != z1.device:
+                prepared_labels = prepared_labels.to(device=z1.device)
+
         target_dtype = torch.float32 if self.force_fp32 else z1.dtype
         z1f = z1.to(target_dtype)
         z2f = z2.to(target_dtype)
@@ -95,16 +111,22 @@ class NTXentLoss(SelfSupervisedLoss):
             z2f = F.normalize(z2f, dim=1)
 
         if self.mode == "paired":
-            return self._paired(z1f, z2f)
-        return self._two_n(z1f, z2f)
+            return self._paired(z1f, z2f, prepared_labels)
+        return self._two_n(z1f, z2f, prepared_labels)
 
     def _paired(
-        self, z1f: torch.Tensor, z2f: torch.Tensor
+        self,
+        z1f: torch.Tensor,
+        z2f: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         est = get_active_estimator()
         if est is not None:
             with torch.no_grad():
-                est.update(torch.cat([z1f, z2f], dim=0))
+                labels_arg = None
+                if labels is not None:
+                    labels_arg = torch.cat([labels, labels], dim=0)
+                est.update(torch.cat([z1f, z2f], dim=0), labels_arg)
         if self.cross_rank_negatives and dist_utils.get_world_size() > 1:
             return self._paired_cross_rank(z1f, z2f)
         sim = z1f @ z2f.t()
@@ -194,12 +216,18 @@ class NTXentLoss(SelfSupervisedLoss):
         return loss, stats
 
     def _two_n(
-        self, z1f: torch.Tensor, z2f: torch.Tensor
+        self,
+        z1f: torch.Tensor,
+        z2f: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         est = get_active_estimator()
         if est is not None:
             with torch.no_grad():
-                est.update(torch.cat([z1f, z2f], dim=0))
+                labels_arg = None
+                if labels is not None:
+                    labels_arg = torch.cat([labels, labels], dim=0)
+                est.update(torch.cat([z1f, z2f], dim=0), labels_arg)
         if self.cross_rank_negatives and dist_utils.get_world_size() > 1:
             return self._two_n_cross_rank(z1f, z2f)
         z_all = torch.cat([z1f, z2f], dim=0)
