@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from mfcl.utils import dist as dist_utils
 from mfcl.telemetry.hardness import get_active_monitor
+from mfcl.mixture.context import get_active_estimator
 from mfcl.losses.base import SelfSupervisedLoss
 
 class NTXentLoss(SelfSupervisedLoss):
@@ -100,6 +101,10 @@ class NTXentLoss(SelfSupervisedLoss):
     def _paired(
         self, z1f: torch.Tensor, z2f: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        est = get_active_estimator()
+        if est is not None:
+            with torch.no_grad():
+                est.update(torch.cat([z1f, z2f], dim=0))
         if self.cross_rank_negatives and dist_utils.get_world_size() > 1:
             return self._paired_cross_rank(z1f, z2f)
         sim = z1f @ z2f.t()
@@ -191,6 +196,10 @@ class NTXentLoss(SelfSupervisedLoss):
     def _two_n(
         self, z1f: torch.Tensor, z2f: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        est = get_active_estimator()
+        if est is not None:
+            with torch.no_grad():
+                est.update(torch.cat([z1f, z2f], dim=0))
         if self.cross_rank_negatives and dist_utils.get_world_size() > 1:
             return self._two_n_cross_rank(z1f, z2f)
         z_all = torch.cat([z1f, z2f], dim=0)

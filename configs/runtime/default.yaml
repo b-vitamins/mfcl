@@ -13,6 +13,16 @@ energy:
   enabled: false
   kwh_price_usd: 0.25
   sample_interval_s: 1.0
+mixture:
+  enabled: false
+  K: 8
+  mode: ema
+  assigner: kmeans_online
+  ema_decay: 0.95
+  store_scores: false
+  scores_mode: append
+  cross_rank: false
+  max_assign_iters: 2
 stability:
   enabled: false
   history_steps: 100
