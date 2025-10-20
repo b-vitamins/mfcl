@@ -226,6 +226,8 @@ def configure_comms_logger(
         _ACTIVE_LOGGER = None
     if not enabled or not is_main:
         return None
+    if not log_path:
+        return None
     logger = CommsLogger(log_path=log_path)
     _ACTIVE_LOGGER = logger
     return logger
