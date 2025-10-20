@@ -8,8 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mfcl.losses.base import SelfSupervisedLoss
 
-class BYOLLoss(nn.Module):
+
+class BYOLLoss(SelfSupervisedLoss):
     """Symmetric cosine/MSE BYOL loss with internal stopgrad on target."""
 
     def __init__(

@@ -14,7 +14,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from mfcl.core.config import Config, from_omegaconf, validate
-from mfcl.core.factory import build_data, build_method, build_optimizer, build_sched
+from mfcl.core.factory import (
+    build_data,
+    build_method,
+    build_optimizer,
+    build_sched,
+    LOSS_REGISTRY,
+)
 from mfcl.engines.hooks import Hook, HookList
 from mfcl.engines.trainer import Trainer
 from mfcl.metrics.knn import knn_predict
@@ -25,6 +31,7 @@ from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logg
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
+from mfcl.telemetry.fidelity import FidelityProbe
 from mfcl.runtime.budget import BudgetTracker
 from mfcl.utils.dist import (
     get_local_rank,
@@ -388,6 +395,40 @@ def _hydra_entry(cfg: DictConfig) -> None:
         is_main=is_main_process(),
     )
 
+    fidelity_probe: FidelityProbe | None = None
+    fidelity_cfg = plain_cfg.get("fidelity", {})
+    if isinstance(fidelity_cfg, dict) and bool(fidelity_cfg.get("enabled", False)):
+        key_a = str(fidelity_cfg.get("loss_a", "")).lower()
+        key_b = str(fidelity_cfg.get("loss_b", "")).lower()
+        if not key_a or not key_b:
+            raise ValueError("fidelity.loss_a and fidelity.loss_b must be set when enabled")
+        if key_a not in LOSS_REGISTRY or key_b not in LOSS_REGISTRY:
+            raise KeyError("Requested fidelity loss not found in registry")
+        loss_ctor_a = LOSS_REGISTRY.get(key_a)
+        loss_ctor_b = LOSS_REGISTRY.get(key_b)
+        loss_a = loss_ctor_a()
+        loss_b = loss_ctor_b()
+        try:
+            beta = float(fidelity_cfg.get("beta", 1e-8))
+        except Exception:
+            beta = 1e-8
+        try:
+            interval = int(fidelity_cfg.get("interval_steps", 500))
+        except Exception:
+            interval = 500
+        log_path = Path(save_dir) / "fidelity.csv" if save_dir else None
+        loss_a.to(device)
+        loss_b.to(device)
+        loss_a.eval()
+        loss_b.eval()
+        fidelity_probe = FidelityProbe(
+            loss_a,
+            loss_b,
+            interval_steps=interval,
+            beta=beta,
+            log_path=log_path,
+        )
+
     budget_tracker: BudgetTracker | None = None
     budget_cfg = runtime_cfg.get("budget", {}) if isinstance(runtime_cfg, dict) else {}
     if isinstance(budget_cfg, dict) and bool(budget_cfg.get("enabled", False)):
@@ -434,6 +475,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         memory_monitor=memory_monitor,
         energy_monitor=energy_monitor,
         budget_tracker=budget_tracker,
+        fidelity_probe=fidelity_probe,
     )
 
     try:

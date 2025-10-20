@@ -11,6 +11,7 @@ from .comms_logger import (
 from .timers import StepTimer
 from .memory import MemoryMonitor
 from .power import PowerMonitor
+from .fidelity import compare_losses, FidelityProbe
 
 __all__ = [
     "StepTimer",
@@ -22,4 +23,6 @@ __all__ = [
     "close_comms_logger",
     "log_collective",
     "PowerMonitor",
+    "compare_losses",
+    "FidelityProbe",
 ]

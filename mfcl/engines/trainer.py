@@ -78,6 +78,7 @@ class Trainer:
         memory_monitor: Optional[MemoryMonitor] = None,
         energy_monitor: Optional[PowerMonitor] = None,
         budget_tracker: Optional[BudgetTracker] = None,
+        fidelity_probe: Any | None = None,
     ) -> None:
         """Construct the trainer.
 
@@ -130,6 +131,10 @@ class Trainer:
         self.memory_monitor = memory_monitor
         self.energy_monitor = energy_monitor
         self.budget_tracker = budget_tracker
+        self.fidelity_probe = fidelity_probe
+        self._fidelity_callback = (
+            getattr(fidelity_probe, "maybe_log", None) if fidelity_probe is not None else None
+        )
         self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
@@ -315,6 +320,7 @@ class Trainer:
         max_steps_override = self._max_steps_override
 
         budget = self.budget_tracker
+        fidelity_cb = self._fidelity_callback
         while True:
             if budget is not None and self._sync_budget_stop_signal(budget.should_stop()):
                 break
@@ -413,6 +419,16 @@ class Trainer:
                 hook_metrics.setdefault("data_time", data_elapsed)
                 hook_metrics.setdefault("compute_time", compute_elapsed)
                 self.hooks.on_batch_end(self._global_step, hook_metrics)
+                if fidelity_cb is not None:
+                    try:
+                        fidelity_cb(
+                            step=self._global_step,
+                            epoch=epoch,
+                            batch=batch,
+                            model=self.method,
+                        )
+                    except Exception:
+                        pass
 
                 if memory_monitor is not None:
                     memory_monitor.record_step_snapshot(
@@ -648,41 +664,18 @@ class Trainer:
         return self.optimizer.param_groups[0]["lr"]
 
     def _sync_budget_stop_signal(self, local_stop: bool) -> bool:
-        """Synchronize budget stop signals across ranks.
+        """Sync a budget stop signal across ranks."""
 
-        When any process determines the budget has been exhausted we need to
-        propagate that information so that other ranks can exit their training
-        loops promptly and avoid collective deadlocks.
-        """
-
-        stop_flag = bool(local_stop) or self._distributed_budget_stop
-        world = get_world_size()
-        if world <= 1 or not dist.is_available() or not dist.is_initialized():
-            self._distributed_budget_stop = stop_flag
-            return stop_flag
-
+        stopped = bool(local_stop) or self._distributed_budget_stop
         try:
-            backend = dist.get_backend()
-            backend_name = backend if isinstance(backend, str) else str(backend)
+            if dist.is_available() and dist.is_initialized():
+                tensor = torch.tensor(1 if stopped else 0, device=self.device)
+                dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+                stopped = bool(tensor.item() > 0)
         except Exception:
-            backend_name = ""
-
-        tensor_device = torch.device("cpu")
-        if backend_name.lower() == "nccl" and hasattr(self.device, "type"):
-            if getattr(self.device, "type", "cpu") == "cuda":
-                tensor_device = self.device
-
-        flag_tensor = torch.tensor(1 if stop_flag else 0, device=tensor_device, dtype=torch.int32)
-        try:
-            dist.all_reduce(flag_tensor, op=dist.ReduceOp.MAX)
-        except Exception:
-            flag_tensor_cpu = flag_tensor.cpu()
-            dist.all_reduce(flag_tensor_cpu, op=dist.ReduceOp.MAX)
-            flag_tensor = flag_tensor_cpu
-
-        stop_flag = bool(flag_tensor.item())
-        self._distributed_budget_stop = stop_flag
-        return stop_flag
+            stopped = bool(local_stop) or self._distributed_budget_stop
+        self._distributed_budget_stop = stopped
+        return stopped
 
     @staticmethod
     def _stats_to_floats(stats: Dict[str, Any]) -> Dict[str, float]:

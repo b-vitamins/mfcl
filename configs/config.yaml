@@ -9,6 +9,7 @@ defaults:
   - knn: disabled
   - linear: default
   - runtime: default
+  - fidelity: default
   - _self_
 
 hydra:

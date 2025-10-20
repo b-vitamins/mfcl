@@ -1,0 +1,5 @@
+enabled: false
+loss_a: ntxent
+loss_b: ntxent
+interval_steps: 500
+beta: 1.0e-08

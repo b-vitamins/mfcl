@@ -8,12 +8,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mfcl.losses.base import SelfSupervisedLoss
+
 
 class QueueLike(Protocol):
     def get(self) -> torch.Tensor: ...
 
 
-class MoCoContrastLoss(nn.Module):
+class MoCoContrastLoss(SelfSupervisedLoss):
     """InfoNCE with momentum keys and queue negatives."""
 
     def __init__(
