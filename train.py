@@ -21,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logger
 from mfcl.telemetry.timers import StepTimer
+from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -314,6 +315,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     nvtx_enabled = bool(runtime_cfg.get("nvtx", False))
 
     step_timer: StepTimer | None = None
+    memory_monitor: MemoryMonitor | None = None
     comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
@@ -325,6 +327,24 @@ def _hydra_entry(cfg: DictConfig) -> None:
             sample_rate=sample_rate,
             log_path=log_path,
             nvtx_enabled=nvtx_enabled,
+            is_main=is_main_process(),
+        )
+
+    memory_cfg = runtime_cfg.get("memory", {}) if isinstance(runtime_cfg, dict) else {}
+    memory_enabled = True
+    memory_step_interval = 10
+    if isinstance(memory_cfg, dict):
+        memory_enabled = bool(memory_cfg.get("enabled", True))
+        try:
+            memory_step_interval = int(memory_cfg.get("step_interval", 10))
+        except Exception:
+            memory_step_interval = 10
+    if memory_enabled and save_dir:
+        memory_log_path = Path(save_dir) / "memory.csv"
+        memory_monitor = MemoryMonitor(
+            enabled=memory_enabled,
+            step_interval=memory_step_interval,
+            log_path=memory_log_path,
             is_main=is_main_process(),
         )
 
@@ -355,6 +375,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         channels_last_inputs=getattr(conf.train, "channels_last", False),
         gpu_augmentor=gpu_augmentor,
         timer=step_timer,
+        memory_monitor=memory_monitor,
     )
 
     try:
@@ -369,6 +390,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
     finally:
         if step_timer is not None:
             step_timer.close()
+        if memory_monitor is not None:
+            memory_monitor.close()
         if comms_logger is not None:
             close_comms_logger()
 

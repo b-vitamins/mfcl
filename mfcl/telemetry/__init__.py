@@ -9,9 +9,11 @@ from .comms_logger import (
     log_collective,
 )
 from .timers import StepTimer
+from .memory import MemoryMonitor
 
 __all__ = [
     "StepTimer",
+    "MemoryMonitor",
     "CommsLogger",
     "PayloadCategory",
     "configure_comms_logger",
