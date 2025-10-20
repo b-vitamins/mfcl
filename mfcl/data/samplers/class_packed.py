@@ -98,6 +98,13 @@ class ClassPackedSampler(Sampler[int]):
             class_to_indices[int(cls)].append(idx)
         if not class_to_indices:
             raise ValueError("ClassPackedSampler found no class labels to sample")
+        if len(class_to_indices) < self.num_classes_per_batch:
+            raise ValueError(
+                "ClassPackedSampler requires at least num_classes_per_batch distinct classes "
+                f"(found={len(class_to_indices)}, "
+                f"num_classes_per_batch={self.num_classes_per_batch})."
+            )
+
         min_count = min(len(indices) for indices in class_to_indices.values())
         if min_count < self.instances_per_class:
             raise ValueError(
