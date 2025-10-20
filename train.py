@@ -47,6 +47,7 @@ from mfcl.utils.dist import (
 )
 from mfcl.utils.seed import set_seed
 from mfcl.mixture.estimator import MixtureStats
+from mfcl.mixture.topr import TopRDiagnostics
 
 
 class KNNHook(Hook):
@@ -512,6 +513,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         )
 
     mixture_cfg = runtime_cfg.get("mixture", {}) if isinstance(runtime_cfg, dict) else {}
+    topr_monitor: TopRDiagnostics | None = None
     if isinstance(mixture_cfg, dict) and bool(mixture_cfg.get("enabled", False)):
         log_dir = save_dir
         store_scores = bool(mixture_cfg.get("store_scores", False))
@@ -534,6 +536,32 @@ def _hydra_entry(cfg: DictConfig) -> None:
             store_scores=store_scores,
             scores_mode=scores_mode,
             max_assign_iters=max_iters,
+        )
+
+        try:
+            topR_value = int(mixture_cfg.get("topR", 0))
+        except Exception:
+            topR_value = 0
+        try:
+            pi_floor = float(mixture_cfg.get("pi_floor", 1e-3))
+        except Exception:
+            pi_floor = 1e-3
+        K_subsample_value = mixture_cfg.get("K_subsample")
+        chunk_size = None
+        if K_subsample_value is not None:
+            try:
+                parsed = int(K_subsample_value)
+            except Exception:
+                parsed = None
+            if parsed is not None and parsed > 0:
+                chunk_size = parsed
+        topr_monitor = TopRDiagnostics(
+            R=topR_value,
+            enabled=True,
+            log_dir=log_dir,
+            is_main=is_main_process(),
+            pi_floor=pi_floor,
+            chunk_size=chunk_size,
         )
 
     beta_ctrl_cfg = runtime_cfg.get("beta_ctrl", {}) if isinstance(runtime_cfg, dict) else {}
@@ -604,6 +632,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         fidelity_probe=fidelity_probe,
         hardness_monitor=hardness_monitor,
         mixture_estimator=mixture_estimator,
+        topr_monitor=topr_monitor,
         scaler=scaler,
         stability_sentry=stability_sentry,
         beta_controller=beta_controller,
@@ -631,6 +660,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             close_comms_logger()
         if mixture_estimator is not None:
             mixture_estimator.close()
+        if topr_monitor is not None:
+            topr_monitor.close()
         if beta_controller is not None:
             beta_controller.close()
 

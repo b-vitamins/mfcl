@@ -23,6 +23,10 @@ mixture:
   scores_mode: append
   cross_rank: false
   max_assign_iters: 2
+  # Top-R diagnostics
+  topR: 0                 # 0 = measure only, don't truncate
+  pi_floor: 1.0e-3        # floor before normalizing pi for Top-R
+  K_subsample: null       # optional chunk size for big-K log-sum-exp
 beta_ctrl:
   enabled: false
   target_mix_inflation_eps: 0.05

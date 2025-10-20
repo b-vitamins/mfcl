@@ -86,6 +86,7 @@ class Trainer:
         hardness_monitor: "HardnessMonitor | None" = None,
         stability_sentry: StabilitySentry | None = None,
         mixture_estimator: Any | None = None,
+        topr_monitor: Any | None = None,
         beta_controller: Optional[BetaController] = None,
     ) -> None:
         """Construct the trainer.
@@ -112,6 +113,7 @@ class Trainer:
             hardness_monitor: Optional HardnessMonitor for top-K negative tracking.
             stability_sentry: Optional StabilitySentry for crash diagnostics.
             mixture_estimator: Optional MixtureStats instance for diagnostics logging.
+            topr_monitor: Optional Top-R diagnostics tracker.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -149,6 +151,7 @@ class Trainer:
         self.hardness_monitor = hardness_monitor
         self.stability_sentry = stability_sentry
         self.mixture_estimator = mixture_estimator
+        self.topr_monitor = topr_monitor
         self.beta_controller = beta_controller
         self._distributed_budget_stop = False
         try:
@@ -401,6 +404,14 @@ class Trainer:
                     if "loss" not in stats:
                         raise KeyError("Method step() must return dict with key 'loss'")
                     loss = stats["loss"]
+                    if self.topr_monitor is not None:
+                        try:
+                            self._maybe_update_topr(
+                                epoch=epoch,
+                                global_step=self._global_step + 1,
+                            )
+                        except Exception:
+                            pass
             finally:
                 if hardness_monitor is not None:
                     hardness_monitor.end_step()
@@ -409,6 +420,13 @@ class Trainer:
                         mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
                     except Exception:
                         pass
+                    if self.topr_monitor is not None:
+                        try:
+                            self.topr_monitor.log_step(
+                                step=self._global_step + 1, epoch=epoch
+                            )
+                        except Exception:
+                            pass
                     if self.beta_controller is not None:
                         try:
                             self._maybe_update_beta_controller(
@@ -710,6 +728,51 @@ class Trainer:
             setattr(method_impl, "mixture_beta", float(beta_value))
         except Exception:
             pass
+
+    def _current_beta_value(self) -> float:
+        method_impl = self._method_impl
+        for attr in ("mixture_beta", "beta", "mixture_beta_raw"):
+            if hasattr(method_impl, attr):
+                value = getattr(method_impl, attr)
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        controller = self.beta_controller
+        if controller is not None and controller.last_beta is not None:
+            try:
+                return float(controller.last_beta)
+            except (TypeError, ValueError):
+                pass
+        return 0.0
+
+    def _maybe_update_topr(self, *, epoch: int, global_step: int) -> None:
+        monitor = self.topr_monitor
+        estimator = self.mixture_estimator
+        if monitor is None or estimator is None:
+            return
+        stats = getattr(estimator, "_last_stats", None)
+        if not isinstance(stats, dict) or not stats:
+            return
+        pi = stats.get("pi")
+        mu = stats.get("mu")
+        sigma = stats.get("Sigma")
+        if pi is None or mu is None or sigma is None:
+            return
+        responsibilities = stats.get("R")
+        Q = stats.get("Q") if isinstance(stats.get("Q"), torch.Tensor) else None
+        beta_value = self._current_beta_value()
+        timer = self.step_timer
+        ctx = timer.range_topr() if timer is not None else nullcontext()
+        with ctx:
+            monitor.update(
+                responsibilities=responsibilities,
+                pi=pi,
+                mu=mu,
+                Sigma=sigma,
+                beta=beta_value,
+                Q=Q,
+            )
 
     def _maybe_update_beta_controller(self, *, epoch: int, global_step: int) -> None:
         controller = self.beta_controller

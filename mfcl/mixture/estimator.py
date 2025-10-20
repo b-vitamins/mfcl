@@ -133,7 +133,7 @@ class MixtureStats:
             if self.assigner == "kmeans_online":
                 self._centroids = stats["mu"].detach().clone()
 
-            if self.assigner == "kmeans_online":
+            if self.assigner in {"kmeans_online", "label_supervised"}:
                 stats = dict(stats)
                 stats["R"] = responsibilities
                 if self._last_stats is not None:
