@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from mfcl.engines.hooks import Hook, HookList
 from typing import Protocol
 from collections.abc import Iterable as _CIterable
+from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
@@ -270,6 +271,8 @@ class Trainer:
         compute_time_total = 0.0
         h2d_bytes_total = 0.0
 
+        comms_logger = get_comms_logger()
+
         while True:
             data_start = prev_end
             try:
@@ -289,6 +292,13 @@ class Trainer:
                     global_step=self._global_step + 1,
                 )
                 timer.record_data(data_elapsed)
+            if comms_logger is not None:
+                comms_logger.begin_step(
+                    epoch=epoch,
+                    step_index=step + 1,
+                    global_step=self._global_step + 1,
+                    timer=timer,
+                )
             if self._gpu_augmentor is not None:
                 batch = self._gpu_augmentor(batch)
             compute_start = time.time()
@@ -394,6 +404,8 @@ class Trainer:
             if timer is not None:
                 ips_value = (batch_size / dt) if (batch_size > 0 and dt > 0) else 0.0
                 timer.end_step(step_time_s=dt, ips=ips_value)
+            if comms_logger is not None:
+                comms_logger.end_step()
 
             prev_end = step_end
             step += 1

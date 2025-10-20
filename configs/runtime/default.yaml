@@ -4,3 +4,5 @@ timing:
   enabled: true
   warmup_steps: 50
   sample_rate: 1
+comms_log:
+  enabled: true
