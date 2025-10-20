@@ -185,7 +185,7 @@ class Config:
     method: MethodConfig
     optim: OptimConfig
     train: TrainConfig
-    stress: StressConfig
+    stress: StressConfig = field(default_factory=StressConfig)
 
 
 def validate(cfg: Config) -> None:
