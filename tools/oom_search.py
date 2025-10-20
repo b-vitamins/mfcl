@@ -93,9 +93,12 @@ def _read_ips(csv_path: Path) -> float:
                 if raw is None:
                     continue
                 try:
-                    values.append(float(raw))
+                    val = float(raw)
                 except Exception:
                     continue
+                if val <= 0.0:
+                    continue
+                values.append(val)
     except Exception:
         return 0.0
     if not values:

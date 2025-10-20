@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from collections.abc import Sized as _Sized
 from pathlib import Path
 from typing import Any, Callable, Dict, Sequence
 
@@ -23,6 +25,7 @@ from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logg
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
+from mfcl.runtime.budget import BudgetTracker
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -385,6 +388,33 @@ def _hydra_entry(cfg: DictConfig) -> None:
         is_main=is_main_process(),
     )
 
+    budget_tracker: BudgetTracker | None = None
+    budget_cfg = runtime_cfg.get("budget", {}) if isinstance(runtime_cfg, dict) else {}
+    if isinstance(budget_cfg, dict) and bool(budget_cfg.get("enabled", False)):
+        mode = str(budget_cfg.get("mode", "iso_time"))
+        limits: dict[str, object] = {}
+        for key in (
+            "max_minutes",
+            "max_tokens",
+            "max_epochs",
+            "max_comm_bytes",
+            "max_energy_Wh",
+        ):
+            if key in budget_cfg and budget_cfg[key] is not None:
+                limits[key] = budget_cfg[key]
+        if "steps_per_epoch" in budget_cfg and budget_cfg["steps_per_epoch"] is not None:
+            limits["steps_per_epoch"] = budget_cfg["steps_per_epoch"]
+        inferred_steps: int | None = None
+        try:
+            inferred_steps = len(train_loader) if isinstance(train_loader, _Sized) else None
+        except Exception:
+            inferred_steps = None
+        if steps_per_epoch is not None:
+            limits.setdefault("steps_per_epoch", steps_per_epoch)
+        elif inferred_steps is not None:
+            limits.setdefault("steps_per_epoch", inferred_steps)
+        budget_tracker = BudgetTracker(mode=mode, limits=limits)
+
     trainer = Trainer(
         method,
         optimizer,
@@ -403,6 +433,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         timer=step_timer,
         memory_monitor=memory_monitor,
         energy_monitor=energy_monitor,
+        budget_tracker=budget_tracker,
     )
 
     try:
@@ -423,6 +454,12 @@ def _hydra_entry(cfg: DictConfig) -> None:
             energy_monitor.close()
         if comms_logger is not None:
             close_comms_logger()
+
+    if budget_tracker is not None and save_dir and is_main_process():
+        snapshot = budget_tracker.snapshot()
+        budget_path = Path(save_dir) / "budget.json"
+        budget_path.parent.mkdir(parents=True, exist_ok=True)
+        budget_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
 
     if is_main_process():
         print(f"[done] epoch={conf.train.epochs} save_dir={save_dir}")
