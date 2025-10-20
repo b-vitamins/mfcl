@@ -29,6 +29,7 @@ from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
 from mfcl.runtime.beta_ctrl import BetaController
 from mfcl.mixture.context import _set_active_estimator
+from mfcl.moments.third import _set_active_sketch
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
 # active trainer instance without introducing import cycles.
@@ -88,7 +89,8 @@ class Trainer:
         mixture_estimator: Any | None = None,
         topr_monitor: Any | None = None,
         beta_controller: Optional[BetaController] = None,
-    ) -> None:
+        third_moment_sketch: Any | None = None,
+        ) -> None:
         """Construct the trainer.
 
         Args:
@@ -114,6 +116,7 @@ class Trainer:
             stability_sentry: Optional StabilitySentry for crash diagnostics.
             mixture_estimator: Optional MixtureStats instance for diagnostics logging.
             topr_monitor: Optional Top-R diagnostics tracker.
+            third_moment_sketch: Optional ThirdMomentSketch for κ₃ diagnostics.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -152,6 +155,7 @@ class Trainer:
         self.stability_sentry = stability_sentry
         self.mixture_estimator = mixture_estimator
         self.topr_monitor = topr_monitor
+        self.third_moment = third_moment_sketch
         self.beta_controller = beta_controller
         self._distributed_budget_stop = False
         try:
@@ -332,6 +336,9 @@ class Trainer:
         energy_monitor = self.energy_monitor
         hardness_monitor = self.hardness_monitor
         mix_estimator = self.mixture_estimator if getattr(self.mixture_estimator, "enabled", False) else None
+        third_sketch = (
+            self.third_moment if getattr(self.third_moment, "enabled", False) else None
+        )
         epoch_energy_start_wh = 0.0
         epoch_energy_start_j = 0.0
         if energy_monitor is not None:
@@ -388,6 +395,23 @@ class Trainer:
                 )
             if mix_estimator is not None:
                 _set_active_estimator(mix_estimator)
+                if third_sketch is not None:
+                    try:
+                        stats = getattr(mix_estimator, "_last_stats", None)
+                        if (
+                            isinstance(stats, dict)
+                            and "pi" in stats
+                            and "mu" in stats
+                        ):
+                            pi = stats["pi"].detach().to(torch.float32)
+                            mu = stats["mu"].detach().to(torch.float32)
+                            if pi.ndim == 1 and mu.ndim == 2 and mu.shape[0] == pi.shape[0]:
+                                global_mu = (pi.unsqueeze(1) * mu).sum(dim=0)
+                                third_sketch.set_mean(global_mu.cpu())
+                    except Exception:
+                        pass
+            if third_sketch is not None:
+                _set_active_sketch(third_sketch)
             if comms_logger is not None:
                 comms_logger.begin_step(
                     epoch=epoch,
@@ -420,22 +444,31 @@ class Trainer:
                         mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
                     except Exception:
                         pass
-                    if self.topr_monitor is not None:
-                        try:
-                            self.topr_monitor.log_step(
-                                step=self._global_step + 1, epoch=epoch
-                            )
-                        except Exception:
-                            pass
-                    if self.beta_controller is not None:
-                        try:
-                            self._maybe_update_beta_controller(
-                                epoch=epoch,
-                                global_step=self._global_step + 1,
-                            )
-                        except Exception:
-                            pass
-                    _set_active_estimator(None)
+                if third_sketch is not None:
+                    try:
+                        third_sketch.log_step(
+                            step=self._global_step + 1, epoch=epoch
+                        )
+                    except Exception:
+                        pass
+                if self.topr_monitor is not None:
+                    try:
+                        self.topr_monitor.log_step(
+                            step=self._global_step + 1, epoch=epoch
+                        )
+                    except Exception:
+                        pass
+                if self.beta_controller is not None:
+                    try:
+                        self._maybe_update_beta_controller(
+                            epoch=epoch,
+                            global_step=self._global_step + 1,
+                        )
+                    except Exception:
+                        pass
+                _set_active_estimator(None)
+                if third_sketch is not None:
+                    _set_active_sketch(None)
             finite = torch.isfinite(loss.detach())
             if finite.dim() == 0:
                 finite_flag = bool(finite.item())
