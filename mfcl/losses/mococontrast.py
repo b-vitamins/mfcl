@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Protocol, Tuple
+from typing import Any, Dict, Protocol, Tuple
 
 import torch
 import torch.nn as nn
@@ -89,6 +89,21 @@ class MoCoContrastLoss(SelfSupervisedLoss):
 
         stats = {"pos_sim": pos.mean().detach(), "neg_sim_mean": neg.mean().detach()}
         return loss, stats
+
+    def _prepare_forward_args(
+        self, outputs: Any, batch: Dict[str, Any], model: Any
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor, QueueLike], Dict[str, Any]]:
+        if not isinstance(outputs, (list, tuple)) or len(outputs) != 2:
+            raise TypeError("MoCoContrastLoss expects (q, k) outputs from the model")
+        q, k = outputs
+
+        queue = getattr(model, "queue", None)
+        if queue is None or not callable(getattr(queue, "get", None)):
+            raise TypeError(
+                "MoCoContrastLoss requires model.queue providing a get() method for fidelity"
+            )
+
+        return (q, k, queue), {}
 
 
 __all__ = ["MoCoContrastLoss", "QueueLike"]
