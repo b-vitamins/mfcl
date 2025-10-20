@@ -27,6 +27,7 @@ from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
+from mfcl.mixture.context import _set_active_estimator
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
 # active trainer instance without introducing import cycles.
@@ -83,6 +84,7 @@ class Trainer:
         fidelity_probe: Any | None = None,
         hardness_monitor: "HardnessMonitor | None" = None,
         stability_sentry: StabilitySentry | None = None,
+        mixture_estimator: Any | None = None,
     ) -> None:
         """Construct the trainer.
 
@@ -107,6 +109,7 @@ class Trainer:
             budget_tracker: Optional BudgetTracker enforcing runtime limits.
             hardness_monitor: Optional HardnessMonitor for top-K negative tracking.
             stability_sentry: Optional StabilitySentry for crash diagnostics.
+            mixture_estimator: Optional MixtureStats instance for diagnostics logging.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -143,6 +146,7 @@ class Trainer:
         )
         self.hardness_monitor = hardness_monitor
         self.stability_sentry = stability_sentry
+        self.mixture_estimator = mixture_estimator
         self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
@@ -321,6 +325,7 @@ class Trainer:
         memory_monitor = self.memory_monitor
         energy_monitor = self.energy_monitor
         hardness_monitor = self.hardness_monitor
+        mix_estimator = self.mixture_estimator if getattr(self.mixture_estimator, "enabled", False) else None
         epoch_energy_start_wh = 0.0
         epoch_energy_start_j = 0.0
         if energy_monitor is not None:
@@ -375,6 +380,8 @@ class Trainer:
                     epoch=epoch,
                     step=self._global_step + 1,
                 )
+            if mix_estimator is not None:
+                _set_active_estimator(mix_estimator)
             if comms_logger is not None:
                 comms_logger.begin_step(
                     epoch=epoch,
@@ -394,6 +401,12 @@ class Trainer:
             finally:
                 if hardness_monitor is not None:
                     hardness_monitor.end_step()
+                if mix_estimator is not None:
+                    try:
+                        mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
+                    except Exception:
+                        pass
+                    _set_active_estimator(None)
             finite = torch.isfinite(loss.detach())
             if finite.dim() == 0:
                 finite_flag = bool(finite.item())

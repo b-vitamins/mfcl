@@ -44,6 +44,7 @@ from mfcl.utils.dist import (
     unwrap_ddp,
 )
 from mfcl.utils.seed import set_seed
+from mfcl.mixture.estimator import MixtureStats
 
 
 class KNNHook(Hook):
@@ -333,6 +334,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     energy_monitor: PowerMonitor | None = None
     hardness_monitor: HardnessMonitor | None = None
     stability_sentry: StabilitySentry | None = None
+    mixture_estimator: MixtureStats | None = None
     comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
@@ -507,6 +509,31 @@ def _hydra_entry(cfg: DictConfig) -> None:
             max_history=history_steps,
         )
 
+    mixture_cfg = runtime_cfg.get("mixture", {}) if isinstance(runtime_cfg, dict) else {}
+    if isinstance(mixture_cfg, dict) and bool(mixture_cfg.get("enabled", False)):
+        log_dir = save_dir
+        store_scores = bool(mixture_cfg.get("store_scores", False))
+        if store_scores and not log_dir:
+            raise ValueError("runtime.mixture.store_scores requires train.save_dir to be set")
+        try:
+            max_iters = int(mixture_cfg.get("max_assign_iters", 2))
+        except Exception:
+            max_iters = 2
+        scores_mode = str(mixture_cfg.get("scores_mode", "append"))
+        mixture_estimator = MixtureStats(
+            K=int(mixture_cfg.get("K", 8)),
+            assigner=str(mixture_cfg.get("assigner", "kmeans_online")),
+            mode=str(mixture_cfg.get("mode", "ema")),
+            ema_decay=float(mixture_cfg.get("ema_decay", 0.95)),
+            enabled=True,
+            is_main=is_main_process(),
+            cross_rank=bool(mixture_cfg.get("cross_rank", False)),
+            log_dir=log_dir,
+            store_scores=store_scores,
+            scores_mode=scores_mode,
+            max_assign_iters=max_iters,
+        )
+
     amp_dtype = getattr(conf.train, "amp_dtype", None)
     amp_enabled = bool(getattr(conf.train, "amp", True))
     if isinstance(amp_dtype, str) and amp_dtype.lower() == "fp32":
@@ -534,6 +561,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         budget_tracker=budget_tracker,
         fidelity_probe=fidelity_probe,
         hardness_monitor=hardness_monitor,
+        mixture_estimator=mixture_estimator,
         scaler=scaler,
         stability_sentry=stability_sentry,
     )
@@ -558,6 +586,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             hardness_monitor.close()
         if comms_logger is not None:
             close_comms_logger()
+        if mixture_estimator is not None:
+            mixture_estimator.close()
 
     if budget_tracker is not None and save_dir and is_main_process():
         snapshot = budget_tracker.snapshot()
