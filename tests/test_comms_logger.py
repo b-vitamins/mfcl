@@ -17,12 +17,43 @@ from mfcl.telemetry.comms_logger import (
 )
 
 
-def test_configure_comms_logger_requires_log_path(tmp_path):
+class _DummyTimer:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.total_ms = 0.0
+
+    def add_comm_ms(self, value: float) -> None:
+        self.calls += 1
+        self.total_ms += value
+
+
+def test_configure_comms_logger_without_log_path_tracks_stats(tmp_path):
     close_comms_logger()
     logger = configure_comms_logger(enabled=True, log_path=None, is_main=True)
-    assert logger is None
-    assert get_comms_logger() is None
+    assert isinstance(logger, CommsLogger)
+    assert logger.enabled is False
+    assert get_comms_logger() is logger
+
+    timer = _DummyTimer()
+    logger.begin_step(epoch=0, step_index=0, global_step=0, timer=timer)
+    tensor = torch.ones(4, dtype=torch.float32)
+    logger.record_event(
+        kind="all_reduce",
+        tensor=tensor,
+        category=PayloadCategory.OTHER,
+        duration_s=0.01,
+    )
+    logger.end_step()
+    totals = logger.pop_last_step_totals()
+    assert totals == {"bytes_total": pytest.approx(0.0)}
+    assert timer.calls == 1
+    assert timer.total_ms == pytest.approx(10.0)
+
+    # No filesystem interaction should occur when the log path is omitted.
     assert list(tmp_path.iterdir()) == []
+
+    close_comms_logger()
+    assert get_comms_logger() is None
 
 
 def test_comms_logger_enabled_property(tmp_path):
