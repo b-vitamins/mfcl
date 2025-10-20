@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mfcl.losses.base import SelfSupervisedLoss
+
 
 def _offdiag(M: torch.Tensor) -> torch.Tensor:
     n, m = M.shape
@@ -16,7 +18,7 @@ def _offdiag(M: torch.Tensor) -> torch.Tensor:
     return M.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
-class VICRegLoss(nn.Module):
+class VICRegLoss(SelfSupervisedLoss):
     """VICReg: invariance + variance + covariance."""
 
     def __init__(

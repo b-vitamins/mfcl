@@ -13,8 +13,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mfcl.utils import dist as dist_utils
+from mfcl.losses.base import SelfSupervisedLoss
 
-class NTXentLoss(nn.Module):
+class NTXentLoss(SelfSupervisedLoss):
     """Normalized temperature-scaled cross-entropy for two views.
 
     Returns:

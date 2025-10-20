@@ -8,8 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mfcl.losses.base import SelfSupervisedLoss
 
-class SimSiamLoss(nn.Module):
+
+class SimSiamLoss(SelfSupervisedLoss):
     """Symmetric negative cosine loss with internal stopgrad."""
 
     def __init__(self, normalize: bool = True, force_fp32: bool = True) -> None:

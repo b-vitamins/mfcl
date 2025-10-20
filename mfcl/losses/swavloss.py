@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mfcl.losses.base import SelfSupervisedLoss
 
-class SwAVLoss(nn.Module):
+
+class SwAVLoss(SelfSupervisedLoss):
     """SwAV swapped assignment with in-graph Sinkhorn."""
 
     def __init__(
@@ -171,6 +173,21 @@ class SwAVLoss(nn.Module):
 
         stats = {"entropy": q_stats_entropy.detach(), "q_max_mean": q_max_mean.detach()}
         return loss, stats
+
+    def _prepare_forward_args(
+        self, outputs: Any, batch: Dict[str, Any], model: Any
+    ) -> Tuple[Iterable[Any], Dict[str, Any]]:
+        if not isinstance(outputs, (list, tuple)) or len(outputs) != 2:
+            raise TypeError("SwAVLoss expects (logits, code_indices) outputs")
+        logits, code_idx = outputs
+        queue_logits: Dict[int, torch.Tensor] | None = None
+        gather = getattr(model, "_gather_queue_logits", None)
+        if callable(gather):
+            try:
+                queue_logits = gather(logits, code_idx)
+            except Exception:
+                queue_logits = None
+        return (logits, code_idx), {"queue_logits": queue_logits}
 
 
 __all__ = ["SwAVLoss"]
