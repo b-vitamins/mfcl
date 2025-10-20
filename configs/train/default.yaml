@@ -2,6 +2,7 @@ epochs: 200
 warmup_epochs: 10
 cosine: true
 amp: true
+amp_dtype: fp16
 grad_clip: null
 save_dir: ${hydra:run.dir}
 seed: 42
@@ -13,4 +14,5 @@ prefetch_depth: 1
 loss_fp32: true
 cudnn_bench: true
 compile: false
+accum_steps: 1
 scheduler_step_on: batch

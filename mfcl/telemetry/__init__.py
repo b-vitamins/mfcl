@@ -13,6 +13,7 @@ from .memory import MemoryMonitor
 from .power import PowerMonitor
 from .fidelity import compare_losses, FidelityProbe
 from .hardness import HardnessMonitor
+from .stability import StabilitySentry, StabilityError
 
 __all__ = [
     "StepTimer",
@@ -27,4 +28,6 @@ __all__ = [
     "compare_losses",
     "FidelityProbe",
     "HardnessMonitor",
+    "StabilitySentry",
+    "StabilityError",
 ]

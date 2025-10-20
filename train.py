@@ -25,6 +25,7 @@ from mfcl.engines.hooks import Hook, HookList
 from mfcl.engines.trainer import Trainer
 from mfcl.metrics.knn import knn_predict
 from mfcl.utils.consolemonitor import ConsoleMonitor
+from mfcl.utils.amp import AmpScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logger
@@ -33,6 +34,7 @@ from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
 from mfcl.telemetry.fidelity import FidelityProbe
 from mfcl.telemetry.hardness import HardnessMonitor
+from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
 from mfcl.utils.dist import (
     get_local_rank,
@@ -330,6 +332,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     memory_monitor: MemoryMonitor | None = None
     energy_monitor: PowerMonitor | None = None
     hardness_monitor: HardnessMonitor | None = None
+    stability_sentry: StabilitySentry | None = None
     comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
@@ -491,6 +494,25 @@ def _hydra_entry(cfg: DictConfig) -> None:
             limits.setdefault("steps_per_epoch", inferred_steps)
         budget_tracker = BudgetTracker(mode=mode, limits=limits)
 
+    stability_cfg = runtime_cfg.get("stability", {}) if isinstance(runtime_cfg, dict) else {}
+    if isinstance(stability_cfg, dict) and bool(stability_cfg.get("enabled", False)):
+        try:
+            history_steps = int(stability_cfg.get("history_steps", 100))
+        except Exception:
+            history_steps = 100
+        stability_sentry = StabilitySentry(
+            enabled=True,
+            save_dir=save_dir,
+            is_main=is_main_process(),
+            max_history=history_steps,
+        )
+
+    amp_dtype = getattr(conf.train, "amp_dtype", None)
+    amp_enabled = bool(getattr(conf.train, "amp", True))
+    if isinstance(amp_dtype, str) and amp_dtype.lower() == "fp32":
+        amp_enabled = False
+    scaler = AmpScaler(enabled=amp_enabled, amp_dtype=amp_dtype)
+
     trainer = Trainer(
         method,
         optimizer,
@@ -501,7 +523,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         save_dir=save_dir,
         keep_k=3,
         log_interval=conf.train.log_interval,
-        accum_steps=1,
+        accum_steps=int(getattr(conf.train, "accum_steps", 1)),
         clip_grad=conf.train.grad_clip if conf.train.grad_clip is not None else None,
         scheduler_step_on=conf.train.scheduler_step_on,
         channels_last_inputs=getattr(conf.train, "channels_last", False),
@@ -512,6 +534,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
         budget_tracker=budget_tracker,
         fidelity_probe=fidelity_probe,
         hardness_monitor=hardness_monitor,
+        scaler=scaler,
+        stability_sentry=stability_sentry,
     )
 
     try:

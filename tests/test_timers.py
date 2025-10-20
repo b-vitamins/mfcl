@@ -65,6 +65,7 @@ def test_segments_sum_close_to_total(tmp_path):
     )
     discrepancy = abs(segments_sum - total_ms)
     assert discrepancy <= 0.05 * total_ms + 1e-3
+    assert "outlier_flags" in row
 
 
 def _run_synthetic_loop(base_dir: Path, enabled: bool) -> float:

@@ -1,0 +1,29 @@
+# Preset tuned for a single 24GB consumer GPU.
+defaults:
+  - override /data: imagenet
+  - override /train: default
+  - override /runtime: default
+
+data:
+  batch_size: 224
+  num_workers: 6
+  prefetch_factor: 2
+  persistent_workers: true
+
+train:
+  amp: true
+  amp_dtype: bf16
+  accum_steps: 1
+  log_interval: 50
+
+runtime:
+  memory:
+    enabled: true
+    step_interval: 5
+  energy:
+    enabled: true
+    sample_interval_s: 2.0
+  comms_log:
+    enabled: true
+  stability:
+    enabled: true
