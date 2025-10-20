@@ -289,7 +289,11 @@ class MixtureStats:
         global_cov = torch.einsum("k,kde->de", pi, cov)
         delta_sigma = cov - global_cov.unsqueeze(0)
         if delta_sigma.numel() > 0:
-            delta_sigma_max = torch.linalg.eigvalsh(delta_sigma).abs().max()
+            if delta_sigma.dtype in {torch.float16, torch.bfloat16}:
+                eigvals = torch.linalg.eigvalsh(delta_sigma.to(dtype=torch.float32))
+            else:
+                eigvals = torch.linalg.eigvalsh(delta_sigma)
+            delta_sigma_max = eigvals.abs().max().to(dtype=B.dtype)
         else:
             delta_sigma_max = embeddings.new_tensor(0.0, dtype=B.dtype)
 
