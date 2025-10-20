@@ -146,6 +146,31 @@ def _maybe_get_encoder(method: torch.nn.Module) -> torch.nn.Module:
 _CLI_FLAGS: dict[str, bool] = {"print_config": False, "ddp_find_unused": False}
 
 
+def _configure_cudnn_benchmark(
+    deterministic: bool,
+    bench_requested: bool,
+) -> None:
+    """Configure cuDNN benchmarking respecting deterministic mode."""
+
+    if not torch.cuda.is_available():  # pragma: no cover - defensive guard
+        return
+
+    if deterministic:
+        if bench_requested:
+            warnings.warn(
+                (
+                    "train.cudnn_bench requested but deterministic seeding is active; "
+                    "disabling cuDNN benchmarking."
+                ),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        torch.backends.cudnn.benchmark = False
+        return
+
+    torch.backends.cudnn.benchmark = bool(bench_requested)
+
+
 def _infer_steps_per_epoch(loader: DataLoader | None) -> int | None:
     try:
         if loader is None:
@@ -215,12 +240,14 @@ def _hydra_entry(cfg: DictConfig) -> None:
     validate(conf)
     if _CLI_FLAGS.get("print_config", False) and is_main_process():
         print(OmegaConf.to_yaml(cfg, resolve=True))
-    set_seed(conf.train.seed, deterministic=True)
+    deterministic_mode = True
+    set_seed(conf.train.seed, deterministic=deterministic_mode)
 
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = bool(conf.train.cudnn_bench)
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        _configure_cudnn_benchmark(deterministic_mode, bool(conf.train.cudnn_bench))
 
-    if torch.cuda.is_available():
+    if cuda_available:
         device = torch.device("cuda", get_local_rank())
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
