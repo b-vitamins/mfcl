@@ -24,6 +24,7 @@ from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
+from mfcl.runtime.budget import BudgetTracker
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
 # active trainer instance without introducing import cycles.
@@ -76,6 +77,7 @@ class Trainer:
         timer: Optional[StepTimer] = None,
         memory_monitor: Optional[MemoryMonitor] = None,
         energy_monitor: Optional[PowerMonitor] = None,
+        budget_tracker: Optional[BudgetTracker] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -97,6 +99,7 @@ class Trainer:
             gpu_augmentor: Optional callable applied to batches after to_device to
                 populate view tensors (used for GPU-side augmentation).
             timer: Optional StepTimer for telemetry logging.
+            budget_tracker: Optional BudgetTracker enforcing runtime limits.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -126,6 +129,7 @@ class Trainer:
         self.step_timer = timer
         self.memory_monitor = memory_monitor
         self.energy_monitor = energy_monitor
+        self.budget_tracker = budget_tracker
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
         except Exception:
@@ -172,6 +176,8 @@ class Trainer:
                 if state:
                     start_epoch = max(1, int(state.get("epoch", 0)) + 1)
                     self._restore_checkpoint_state(state)
+                    if self.budget_tracker is not None:
+                        self.budget_tracker.load(state.get("budget"))
 
             self.method.train()
             try:
@@ -193,6 +199,8 @@ class Trainer:
             self.hooks.on_train_start(train_state)
 
             for epoch in range(start_epoch, epochs + 1):
+                if self.budget_tracker is not None and self.budget_tracker.should_stop():
+                    break
                 train_state["epoch"] = epoch
                 train_state["global_step"] = self._global_step
                 self.hooks.on_epoch_start(epoch, train_state)
@@ -216,13 +224,16 @@ class Trainer:
                         "scaler": self.scaler.state_dict() if self.scaler else None,
                         "metrics": epoch_metrics,
                     }
+                    if self.budget_tracker is not None:
+                        ckpt["budget"] = self.budget_tracker.snapshot()
                     path = os.path.join(self.save_dir, f"ckpt_ep{epoch:04d}.pt")
                     save_checkpoint(path, ckpt, keep_k=self.keep_k, make_latest=True)
                     self.hooks.on_checkpoint(path, ckpt)
 
                 # Eval hook
                 if epoch % eval_every == 0:
-                    self.hooks.on_eval_end(epoch_metrics)
+                    if self.budget_tracker is None or not self.budget_tracker.should_stop():
+                        self.hooks.on_eval_end(epoch_metrics)
 
                 if self.scheduler and self.scheduler_step_on == "epoch":
                     self.scheduler.step()
@@ -292,9 +303,13 @@ class Trainer:
         epoch_energy_start_j = 0.0
         if energy_monitor is not None:
             epoch_energy_start_wh, epoch_energy_start_j = energy_monitor.get_totals()
+        step_energy_prev_wh = epoch_energy_start_wh
         max_steps_override = self._max_steps_override
 
+        budget = self.budget_tracker
         while True:
+            if budget is not None and budget.should_stop():
+                break
             data_start = prev_end
             try:
                 batch = next(iterator)
@@ -306,6 +321,13 @@ class Trainer:
             data_time_total += data_elapsed
             h2d_bytes_total += float(self._last_move_bytes)
             timer = self.step_timer
+            if self._gpu_augmentor is not None:
+                batch = self._gpu_augmentor(batch)
+            tokens_this_step = 0
+            if budget is not None:
+                tokens_this_step = self._count_tokens(batch)
+                if budget.would_exceed(step_samples=tokens_this_step):
+                    break
             if memory_monitor is not None:
                 memory_monitor.update_step_context(
                     epoch=epoch,
@@ -332,8 +354,6 @@ class Trainer:
                     global_step=self._global_step + 1,
                     timer=timer,
                 )
-            if self._gpu_augmentor is not None:
-                batch = self._gpu_augmentor(batch)
             compute_start = time.time()
             forward_ctx = timer.range_forward() if timer is not None else nullcontext()
             with forward_ctx:
@@ -443,11 +463,30 @@ class Trainer:
             if timer is not None:
                 ips_value = (batch_size / dt) if (batch_size > 0 and dt > 0) else 0.0
                 timer.end_step(step_time_s=dt, ips=ips_value)
+            comm_bytes_total = 0.0
             if comms_logger is not None:
                 comms_logger.end_step()
+                totals = comms_logger.pop_last_step_totals()
+                if totals is not None:
+                    comm_bytes_total = float(totals.get("bytes_total", 0.0))
 
             prev_end = step_end
             step += 1
+
+            energy_delta_wh = 0.0
+            if energy_monitor is not None:
+                total_wh, _ = energy_monitor.get_totals()
+                energy_delta_wh = max(0.0, total_wh - step_energy_prev_wh)
+                step_energy_prev_wh = total_wh
+            if budget is not None:
+                budget.update(
+                    step_samples=tokens_this_step,
+                    step_wall_ms=dt * 1000.0,
+                    comm_bytes=int(comm_bytes_total),
+                    energy_Wh=energy_delta_wh,
+                )
+                if budget.should_stop():
+                    break
 
             if max_steps_override and self._global_step >= max_steps_override:
                 break
@@ -471,14 +510,13 @@ class Trainer:
         global_epoch_time = float(epoch_time)
         epoch_energy_wh_value = 0.0
         epoch_energy_per_image_j = 0.0
-        epoch_energy_j_value = 0.0
         epoch_energy_cost = 0.0
+        energy_epoch_j = 0.0
         if energy_monitor is not None:
             total_wh, total_j = energy_monitor.get_totals()
             energy_epoch_wh = max(0.0, total_wh - epoch_energy_start_wh)
             energy_epoch_j = max(0.0, total_j - epoch_energy_start_j)
             epoch_energy_wh_value = energy_epoch_wh
-            epoch_energy_j_value = energy_epoch_j
             epoch_energy_cost = energy_monitor.get_epoch_cost(energy_epoch_wh)
         if get_world_size() > 1 and dist.is_available() and dist.is_initialized():
             try:
@@ -497,7 +535,7 @@ class Trainer:
 
         if energy_monitor is not None:
             epoch_energy_per_image_j = (
-                epoch_energy_j_value / global_samples if global_samples > 0 else 0.0
+                energy_epoch_j / global_samples if global_samples > 0 else 0.0
             )
 
         if is_main_process():
@@ -677,6 +715,58 @@ class Trainer:
                 return int(first.shape[0])
             if isinstance(first, (list, tuple)):
                 return len(batch)
+        return 0
+
+    def _count_tokens(self, batch: Any) -> int:
+        """Estimate the number of augmented views processed in ``batch``."""
+
+        if torch.is_tensor(batch):
+            return int(batch.shape[0]) if batch.ndim > 0 else 0
+        if isinstance(batch, dict):
+            crops = batch.get("crops")
+            if isinstance(crops, list):
+                total = 0
+                for tensor in crops:
+                    if torch.is_tensor(tensor) and tensor.ndim > 0:
+                        total += int(tensor.shape[0])
+                if total > 0:
+                    return total
+            view_total = 0
+            view_found = False
+            for key, value in batch.items():
+                if key.startswith("view") and torch.is_tensor(value) and value.ndim > 0:
+                    view_total += int(value.shape[0])
+                    view_found = True
+            if view_found and view_total > 0:
+                return view_total
+            image = batch.get("image")
+            if torch.is_tensor(image) and image.ndim > 0:
+                return int(image.shape[0])
+            if isinstance(image, list):
+                total = 0
+                for item in image:
+                    if torch.is_tensor(item) and item.ndim > 0:
+                        total += int(item.shape[0])
+                    elif isinstance(item, (list, tuple)):
+                        nested = self._count_tokens(item)
+                        if nested > 0:
+                            total += nested
+                if total > 0:
+                    return total
+            for key, value in batch.items():
+                if key == "index":
+                    continue
+                nested = self._count_tokens(value)
+                if nested > 0:
+                    return nested
+            return 0
+        if isinstance(batch, (list, tuple)):
+            total = 0
+            for item in batch:
+                nested = self._count_tokens(item)
+                if nested > 0:
+                    total += nested
+            return total
         return 0
 
     def _restore_checkpoint_state(self, state: Dict[str, Any]) -> None:

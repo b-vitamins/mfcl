@@ -13,3 +13,12 @@ energy:
   enabled: false
   kwh_price_usd: 0.25
   sample_interval_s: 1.0
+budget:
+  enabled: false
+  mode: iso_time
+  max_minutes: null
+  max_tokens: null
+  max_epochs: null
+  max_comm_bytes: null
+  max_energy_Wh: null
+  steps_per_epoch: null

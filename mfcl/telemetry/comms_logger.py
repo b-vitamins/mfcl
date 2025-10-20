@@ -56,6 +56,7 @@ class CommsLogger:
         self._csv_writer: csv.DictWriter[str] | None = None
         self._active = False
         self._step = _StepAccumulators()
+        self._last_step_totals: dict[str, float] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -132,10 +133,12 @@ class CommsLogger:
             row[f"t_{kind}_ms"] = self._step.op_time_s.get(kind, 0.0) * 1000.0
         row["t_total_ms"] = total_time_s * 1000.0
         if total_time_s > 0:
-            # Report binary-prefixed throughput to match the 1024 scaling.
+            # Binary (MiB/s) and decimal (MB/s) throughput for clarity.
             row["eff_bandwidth_MiBps"] = (bytes_total / (1024 ** 2)) / total_time_s
+            row["eff_bandwidth_MBps"] = (bytes_total / 1_000_000.0) / total_time_s
         else:
             row["eff_bandwidth_MiBps"] = 0.0
+            row["eff_bandwidth_MBps"] = 0.0
 
         assert self._step.category_bytes is not None
         row.update(
@@ -152,6 +155,7 @@ class CommsLogger:
             }
         )
 
+        self._last_step_totals = {"bytes_total": bytes_total}
         self._write_row(row)
 
     def close(self) -> None:
@@ -161,6 +165,13 @@ class CommsLogger:
             finally:
                 self._csv_handle = None
                 self._csv_writer = None
+
+    def pop_last_step_totals(self) -> dict[str, float] | None:
+        """Return the totals from the previously completed step."""
+
+        totals = self._last_step_totals
+        self._last_step_totals = None
+        return totals
 
     def _write_row(self, row: dict[str, float]) -> None:
         if self._log_path is None:
@@ -183,6 +194,7 @@ class CommsLogger:
                 "t_broadcast_ms",
                 "t_total_ms",
                 "eff_bandwidth_MiBps",
+                "eff_bandwidth_MBps",
                 "bytes_features_allgather",
                 "bytes_moments_mu",
                 "bytes_moments_sigma_full",

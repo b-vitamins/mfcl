@@ -75,6 +75,8 @@ class StepTimer:
         self._csv_handle: Optional[IO[str]] = None
         self._csv_writer: Optional[csv.DictWriter[str]] = None
         self._comm_ms: float = 0.0
+        self._rows_since_flush = 0
+        self._flush_interval = 10
 
     def close(self) -> None:
         """Close the underlying CSV handle if it is open."""
@@ -85,6 +87,7 @@ class StepTimer:
             finally:
                 self._csv_handle = None
                 self._csv_writer = None
+                self._rows_since_flush = 0
 
     def begin_step(self, *, epoch: int, step_index: int, global_step: Optional[int] = None) -> None:
         """Mark the start of a new step and apply warmup/sample filters."""
@@ -291,7 +294,10 @@ class StepTimer:
             return
         writer.writerow(row)
         if self._csv_handle is not None:
-            self._csv_handle.flush()
+            self._rows_since_flush += 1
+            if self._flush_interval <= 1 or self._rows_since_flush >= self._flush_interval:
+                self._csv_handle.flush()
+                self._rows_since_flush = 0
 
     def __del__(self) -> None:  # pragma: no cover - cleanup best effort
         try:
