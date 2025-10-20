@@ -22,6 +22,7 @@ from typing import Protocol
 from collections.abc import Iterable as _CIterable
 from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
+from mfcl.telemetry.memory import MemoryMonitor
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
 # active trainer instance without introducing import cycles.
@@ -72,6 +73,7 @@ class Trainer:
         channels_last_inputs: bool = False,
         gpu_augmentor: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         timer: Optional[StepTimer] = None,
+        memory_monitor: Optional[MemoryMonitor] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -120,6 +122,12 @@ class Trainer:
         self.channels_last_inputs = bool(channels_last_inputs)
         self._gpu_augmentor = gpu_augmentor
         self.step_timer = timer
+        self.memory_monitor = memory_monitor
+        try:
+            env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
+        except Exception:
+            env_steps = 0
+        self._max_steps_override = max(0, env_steps)
 
         base_method = unwrap_ddp(self.method)
         base_method.to(self.device)
@@ -216,6 +224,9 @@ class Trainer:
                 if self.scheduler and self.scheduler_step_on == "epoch":
                     self.scheduler.step()
 
+                if self._max_steps_override and self._global_step >= self._max_steps_override:
+                    break
+
             barrier()
         finally:
             CURRENT_TRAINER = prev_trainer
@@ -272,6 +283,8 @@ class Trainer:
         h2d_bytes_total = 0.0
 
         comms_logger = get_comms_logger()
+        memory_monitor = self.memory_monitor
+        max_steps_override = self._max_steps_override
 
         while True:
             data_start = prev_end
@@ -285,6 +298,12 @@ class Trainer:
             data_time_total += data_elapsed
             h2d_bytes_total += float(self._last_move_bytes)
             timer = self.step_timer
+            if memory_monitor is not None:
+                memory_monitor.update_step_context(
+                    epoch=epoch,
+                    step_index=step + 1,
+                    global_step=self._global_step + 1,
+                )
             if timer is not None:
                 timer.begin_step(
                     epoch=epoch,
@@ -353,6 +372,12 @@ class Trainer:
                 hook_metrics.setdefault("compute_time", compute_elapsed)
                 self.hooks.on_batch_end(self._global_step, hook_metrics)
 
+                if memory_monitor is not None:
+                    memory_monitor.record_step_snapshot(
+                        epoch=epoch,
+                        global_step=self._global_step,
+                    )
+
                 should_tail = (total > 0 and step == total - 1)
                 if is_main_process() and (
                     step % self.log_interval == 0 or should_tail
@@ -409,6 +434,9 @@ class Trainer:
 
             prev_end = step_end
             step += 1
+
+            if max_steps_override and self._global_step >= max_steps_override:
+                break
 
         # Flush gradients if the final micro-batch count does not evenly divide the
         # accumulation factor. Without this step, the trailing micro-batches would

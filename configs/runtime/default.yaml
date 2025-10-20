@@ -6,3 +6,6 @@ timing:
   sample_rate: 1
 comms_log:
   enabled: true
+memory:
+  enabled: true
+  step_interval: 10
