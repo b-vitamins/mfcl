@@ -192,19 +192,18 @@ def _collect_energy(run: RunSummary) -> None:
     try:
         with energy_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
-            if not reader.fieldnames or "gpu_id" not in reader.fieldnames or "energy_J_cum" not in reader.fieldnames:
+            fieldnames = reader.fieldnames or []
+            if "gpu_id" not in fieldnames or "energy_J_cum" not in fieldnames:
                 return
             last_by_gpu: dict[str, float] = {}
             for row in reader:
                 gpu_key = str(row.get("gpu_id"))
                 try:
-                    last_by_gpu[gpu_key] = float(row.get("energy_J_cum", ""))
-                except (TypeError, ValueError):
+                    last_by_gpu[gpu_key] = float(row["energy_J_cum"])
+                except (TypeError, ValueError, KeyError):
                     continue
         if last_by_gpu:
             run.energy_Wh = sum(last_by_gpu.values()) / 3600.0
-    except KeyError:
-        return
     except Exception:  # pragma: no cover - defensive
         return
 

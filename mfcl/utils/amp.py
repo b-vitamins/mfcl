@@ -6,6 +6,7 @@ scaling across CUDA-enabled and CPU-only environments.
 
 from __future__ import annotations
 
+import os
 from contextlib import nullcontext
 from typing import Any, ContextManager, Dict, Optional
 
@@ -24,7 +25,10 @@ class AmpScaler:
     """
 
     def __init__(
-        self, enabled: Optional[bool] = None, init_scale: float = 2.0**16
+        self,
+        enabled: Optional[bool] = None,
+        init_scale: float = 2.0**16,
+        amp_dtype: Optional[str] = None,
     ) -> None:
         """Create an AMP scaler wrapper.
 
@@ -34,6 +38,23 @@ class AmpScaler:
         """
         if enabled is None:
             enabled = torch.cuda.is_available()
+        requested_dtype = amp_dtype or os.environ.get("MFCL_AMP_DTYPE")
+        dtype_map = {
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "half": torch.float16,
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+        }
+        self._cast_dtype = None
+        if requested_dtype:
+            key = str(requested_dtype).lower()
+            if key in {"fp32", "float32"}:
+                enabled = False
+            elif key in dtype_map:
+                self._cast_dtype = dtype_map[key]
+            else:
+                raise ValueError(f"Unsupported AMP dtype: {requested_dtype}")
         self._enabled = bool(enabled)
         # Prefer torch.amp API (device-aware); fall back to cuda.amp for older versions
         self._scaler: Any | None = None
@@ -52,10 +73,15 @@ class AmpScaler:
         gradients are in their true scale prior to clipping.
         """
         if self._enabled:
+            target = self._cast_dtype
             try:
-                return torch.amp.autocast("cuda")  # type: ignore[attr-defined]
+                if target is None:
+                    return torch.amp.autocast("cuda")  # type: ignore[attr-defined]
+                return torch.amp.autocast("cuda", dtype=target)  # type: ignore[attr-defined]
             except Exception:
-                return torch.cuda.amp.autocast()
+                if target is None:
+                    return torch.cuda.amp.autocast()
+                return torch.cuda.amp.autocast(dtype=target)
         return nullcontext()
 
     def scale(self, loss: torch.Tensor) -> torch.Tensor:

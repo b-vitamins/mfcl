@@ -160,6 +160,7 @@ class TrainConfig:
     warmup_epochs: int = 10
     cosine: bool = True
     amp: bool = True
+    amp_dtype: str = "fp16"
     grad_clip: float | None = None
     save_dir: str = "runs/simclr_r18_160"
     seed: int = 42
@@ -171,6 +172,7 @@ class TrainConfig:
     loss_fp32: bool = True
     cudnn_bench: bool = True
     compile: bool = False
+    accum_steps: int = 1
     # Reserved for trainer control; factory is agnostic to step granularity.
     scheduler_step_on: str = "epoch"
 
@@ -255,6 +257,11 @@ def validate(cfg: Config) -> None:
         raise ValueError("train.loss_fp32 must be boolean")
     if getattr(cfg.train, "cudnn_bench", True) not in {True, False}:
         raise ValueError("train.cudnn_bench must be boolean")
+    if getattr(cfg.train, "accum_steps", 1) < 1:
+        raise ValueError("train.accum_steps must be >= 1")
+    amp_dtype = getattr(cfg.train, "amp_dtype", "fp16")
+    if str(amp_dtype).lower() not in {"fp16", "float16", "half", "bf16", "bfloat16", "fp32", "float32"}:
+        raise ValueError("train.amp_dtype must be fp16/bf16/fp32")
 
     if hasattr(cfg.train, "scheduler_step_on"):
         if cfg.train.scheduler_step_on not in {"batch", "epoch"}:

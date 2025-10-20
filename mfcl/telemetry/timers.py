@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import csv
 import time
+from bisect import bisect_left, insort
+from collections import deque
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import IO, Dict, Optional
+from typing import IO, Dict, List, Optional
 
 import torch
 
@@ -28,6 +30,7 @@ class StepTimer:
         "t_misc_ms",
         "t_step_ms",
         "ips_step",
+        "outlier_flags",
     ]
 
     def __init__(
@@ -77,6 +80,11 @@ class StepTimer:
         self._comm_ms: float = 0.0
         self._rows_since_flush = 0
         self._flush_interval = 10
+        window = 20
+        self._step_history = deque(maxlen=window)
+        self._comm_history = deque(maxlen=window)
+        self._step_sorted: List[float] = []
+        self._comm_sorted: List[float] = []
 
     def close(self) -> None:
         """Close the underlying CSV handle if it is open."""
@@ -187,6 +195,17 @@ class StepTimer:
         residual = step_ms - known_total
         misc_ms = max(0.0, misc_manual_ms + residual)
 
+        flags: list[str] = []
+        med = self._rolling_median(self._step_sorted)
+        if med > 0.0 and step_ms > 3.0 * med:
+            flags.append("step")
+        med_comm = self._rolling_median(self._comm_sorted)
+        if med_comm > 0.0 and comm_ms > 3.0 * med_comm:
+            flags.append("comm")
+
+        self._push_history(self._step_history, self._step_sorted, step_ms)
+        self._push_history(self._comm_history, self._comm_sorted, comm_ms)
+
         row = {
             "step": self._current_step_id,
             "epoch": self._current_epoch,
@@ -201,10 +220,31 @@ class StepTimer:
             "t_misc_ms": misc_ms,
             "t_step_ms": step_ms,
             "ips_step": float(ips) if ips is not None else 0.0,
+            "outlier_flags": ";".join(flags) if flags else "",
         }
         self._write_row(row)
         self._active = False
         self._current = {}
+
+    @staticmethod
+    def _push_history(queue: deque[float], sorted_list: List[float], value: float) -> None:
+        if queue.maxlen is not None and len(queue) == queue.maxlen:
+            oldest = queue.popleft()
+            idx = bisect_left(sorted_list, oldest)
+            if 0 <= idx < len(sorted_list):
+                del sorted_list[idx]
+        queue.append(value)
+        insort(sorted_list, value)
+
+    @staticmethod
+    def _rolling_median(sorted_list: List[float]) -> float:
+        n = len(sorted_list)
+        if n < 5:
+            return 0.0
+        mid = n // 2
+        if n % 2:
+            return float(sorted_list[mid])
+        return float((sorted_list[mid - 1] + sorted_list[mid]) * 0.5)
 
     def _segment_range(self, name: str):
         if not self._active:

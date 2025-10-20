@@ -25,6 +25,7 @@ from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
+from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
@@ -81,6 +82,7 @@ class Trainer:
         budget_tracker: Optional[BudgetTracker] = None,
         fidelity_probe: Any | None = None,
         hardness_monitor: "HardnessMonitor | None" = None,
+        stability_sentry: StabilitySentry | None = None,
     ) -> None:
         """Construct the trainer.
 
@@ -104,6 +106,7 @@ class Trainer:
             timer: Optional StepTimer for telemetry logging.
             budget_tracker: Optional BudgetTracker enforcing runtime limits.
             hardness_monitor: Optional HardnessMonitor for top-K negative tracking.
+            stability_sentry: Optional StabilitySentry for crash diagnostics.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -139,6 +142,7 @@ class Trainer:
             getattr(fidelity_probe, "maybe_log", None) if fidelity_probe is not None else None
         )
         self.hardness_monitor = hardness_monitor
+        self.stability_sentry = stability_sentry
         self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
@@ -395,6 +399,15 @@ class Trainer:
                 finite_flag = bool(finite.item())
             else:
                 finite_flag = bool(finite.all().item())
+            if self.stability_sentry is not None:
+                self.stability_sentry.check_loss(
+                    loss,
+                    batch=batch,
+                    optimizer=self.optimizer,
+                    scaler=self.scaler,
+                    step=self._global_step + 1,
+                    epoch=epoch,
+                )
             if not finite_flag:
                 self.console.newline()
                 raise RuntimeError("Loss exploded (non-finite scalar encountered)")
@@ -414,7 +427,12 @@ class Trainer:
                     timer.range_optimizer() if timer is not None else nullcontext()
                 )
                 with optimizer_ctx:
-                    last_lr = self._apply_optimizer_step(self.accum_steps)
+                    last_lr = self._apply_optimizer_step(
+                        self.accum_steps,
+                        epoch=epoch,
+                        global_step=self._global_step + 1,
+                        batch=batch,
+                    )
 
             # Update meters and console
             compute_end = time.time()
@@ -508,6 +526,19 @@ class Trainer:
                 if totals is not None:
                     comm_bytes_total = float(totals.get("bytes_total", 0.0))
 
+            if self.stability_sentry is not None:
+                try:
+                    loss_value = float(loss.detach().to(torch.float32).item())
+                except Exception:
+                    loss_value = float("nan")
+                self.stability_sentry.record_step(
+                    step=self._global_step,
+                    epoch=epoch,
+                    loss=loss_value,
+                    step_time_s=dt,
+                    comm_bytes=comm_bytes_total,
+                )
+
             prev_end = step_end
             step += 1
 
@@ -533,7 +564,12 @@ class Trainer:
         # accumulation factor. Without this step, the trailing micro-batches would
         # never update the model parameters and would leak into the next epoch.
         if count > 0 and (count % self.accum_steps) != 0:
-            last_lr = self._apply_optimizer_step(count % self.accum_steps)
+            last_lr = self._apply_optimizer_step(
+                count % self.accum_steps,
+                epoch=epoch,
+                global_step=self._global_step,
+                batch=None,
+            )
 
         # Epoch-level reduce (loss)
         reduce_map = {
@@ -616,7 +652,14 @@ class Trainer:
             "energy_epoch_cost_usd": epoch_energy_cost,
         }
 
-    def _apply_optimizer_step(self, micro_batches_in_step: int) -> float:
+    def _apply_optimizer_step(
+        self,
+        micro_batches_in_step: int,
+        *,
+        epoch: int | None,
+        global_step: int | None,
+        batch: Any | None,
+    ) -> float:
         """Apply an optimizer step handling AMP, clipping and scheduling."""
         # Unscale before optional gradient clipping to avoid scaling issues
         self.scaler.unscale_(self.optimizer)
@@ -636,7 +679,14 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(
                 self.method.parameters(), max_norm=float(self.clip_grad)
             )
-        if self.guard_grad_nan:
+        if self.stability_sentry is not None:
+            self.stability_sentry.check_gradients(
+                self.optimizer,
+                batch=batch,
+                step=global_step if global_step is not None else 0,
+                epoch=epoch if epoch is not None else 0,
+            )
+        elif self.guard_grad_nan:
             total_norm = 0.0
             for group in self.optimizer.param_groups:
                 for p in group.get("params", []):
@@ -645,7 +695,6 @@ class Trainer:
                         if torch.any(torch.isnan(v)) or torch.any(torch.isinf(v)):
                             raise RuntimeError("Detected NaN/Inf in gradients")
                         total_norm += float(v.norm(2).detach().item() ** 2)
-            # total_norm retained for potential debugging/logging hooks.
         # Apply optimizer step via scaler; detect if the step was skipped due to inf/NaN
         prev_scale: float | None = None
         if hasattr(self.scaler, "scaler") and self.scaler.scaler is not None:

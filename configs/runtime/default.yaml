@@ -13,6 +13,9 @@ energy:
   enabled: false
   kwh_price_usd: 0.25
   sample_interval_s: 1.0
+stability:
+  enabled: false
+  history_steps: 100
 budget:
   enabled: false
   mode: iso_time
