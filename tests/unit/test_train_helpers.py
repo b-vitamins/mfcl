@@ -1,4 +1,5 @@
 import pytest
+import train as train_module
 
 from mfcl.core.config import (
     AugConfig,
@@ -9,7 +10,7 @@ from mfcl.core.config import (
     OptimConfig,
     TrainConfig,
 )
-from train import _maybe_autofill_byol_schedule_steps
+from train import _maybe_autofill_byol_schedule_steps, _warn_beta_ctrl_requires_mixture
 
 
 def _make_cfg(**method_kwargs) -> Config:
@@ -40,3 +41,22 @@ def test_autofill_requires_steps_for_cosine():
     cfg = _make_cfg(byol_momentum_schedule="cosine", byol_momentum_schedule_steps=None)
     with pytest.raises(ValueError):
         _maybe_autofill_byol_schedule_steps(cfg, steps_per_epoch=None)
+
+
+def test_warn_beta_ctrl_requires_mixture(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_warn(message, category=None, stacklevel=1):
+        captured["message"] = message
+        captured["category"] = category
+        captured["stacklevel"] = stacklevel
+
+    monkeypatch.setattr(train_module.warnings, "warn", fake_warn)
+    _warn_beta_ctrl_requires_mixture()
+
+    assert captured["message"] == (
+        "runtime.beta_ctrl.enabled is true but runtime.mixture.enabled is false; "
+        "beta control requires mixture statistics."
+    )
+    assert captured["category"] is RuntimeWarning
+    assert captured["stacklevel"] == 2

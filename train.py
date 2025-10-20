@@ -177,6 +177,17 @@ def _maybe_autofill_byol_schedule_steps(conf: Config, steps_per_epoch: int | Non
     conf.method.byol_momentum_schedule_steps = int(total_steps)
 
 
+def _warn_beta_ctrl_requires_mixture() -> None:
+    warnings.warn(
+        (
+            "runtime.beta_ctrl.enabled is true but runtime.mixture.enabled is false; "
+            "beta control requires mixture statistics."
+        ),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 @hydra.main(config_path="configs", config_name="config", version_base="1.3")
 def _hydra_entry(cfg: DictConfig) -> None:
     init_distributed()
@@ -598,11 +609,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         mixture_cfg.get("enabled", False)
     )
     if beta_ctrl_enabled and not mixture_enabled:
-        warnings.warn(
-            "runtime.beta_ctrl.enabled is true but runtime.mixture.enabled is false;"
-            " beta control requires mixture statistics.",
-            RuntimeWarning,
-        )
+        _warn_beta_ctrl_requires_mixture()
     if beta_ctrl_enabled and mixture_enabled:
         try:
             target_eps = float(beta_ctrl_cfg.get("target_mix_inflation_eps", 0.05))
