@@ -19,6 +19,7 @@ from mfcl.metrics.knn import knn_predict
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from mfcl.telemetry.timers import StepTimer
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -298,6 +299,33 @@ def _hydra_entry(cfg: DictConfig) -> None:
             event["resumed_from"] = str(resume)
         append_event(prov_dir, event)
 
+    timing_cfg: dict[str, Any] = {}
+    runtime_cfg: dict[str, Any] = {}
+    if isinstance(runtime_dict, dict):
+        runtime_cfg = runtime_dict
+        timing_node = runtime_dict.get("timing", {})
+        if isinstance(timing_node, dict):
+            timing_cfg = timing_node
+    timing_enabled = bool(timing_cfg.get("enabled", True))
+    warmup_steps = int(max(0, int(timing_cfg.get("warmup_steps", 50))))
+    sample_rate_raw = int(timing_cfg.get("sample_rate", 1))
+    sample_rate = 1 if sample_rate_raw <= 0 else sample_rate_raw
+    nvtx_enabled = bool(runtime_cfg.get("nvtx", False))
+
+    step_timer: StepTimer | None = None
+    if timing_enabled:
+        log_path: Path | None = None
+        if save_dir:
+            log_path = Path(save_dir) / "timings.csv"
+        step_timer = StepTimer(
+            enabled=timing_enabled,
+            warmup_steps=warmup_steps,
+            sample_rate=sample_rate,
+            log_path=log_path,
+            nvtx_enabled=nvtx_enabled,
+            is_main=is_main_process(),
+        )
+
     trainer = Trainer(
         method,
         optimizer,
@@ -313,16 +341,21 @@ def _hydra_entry(cfg: DictConfig) -> None:
         scheduler_step_on=conf.train.scheduler_step_on,
         channels_last_inputs=getattr(conf.train, "channels_last", False),
         gpu_augmentor=gpu_augmentor,
+        timer=step_timer,
     )
 
-    trainer.fit(
-        train_loader,
-        val_loader=None,
-        epochs=conf.train.epochs,
-        resume_path=resume,
-        eval_every=1,
-        save_every=1,
-    )
+    try:
+        trainer.fit(
+            train_loader,
+            val_loader=None,
+            epochs=conf.train.epochs,
+            resume_path=resume,
+            eval_every=1,
+            save_every=1,
+        )
+    finally:
+        if step_timer is not None:
+            step_timer.close()
 
     if is_main_process():
         print(f"[done] epoch={conf.train.epochs} save_dir={save_dir}")
