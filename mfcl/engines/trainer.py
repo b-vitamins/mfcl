@@ -471,15 +471,14 @@ class Trainer:
         global_epoch_time = float(epoch_time)
         epoch_energy_wh_value = 0.0
         epoch_energy_per_image_j = 0.0
+        epoch_energy_j_value = 0.0
         epoch_energy_cost = 0.0
         if energy_monitor is not None:
             total_wh, total_j = energy_monitor.get_totals()
             energy_epoch_wh = max(0.0, total_wh - epoch_energy_start_wh)
             energy_epoch_j = max(0.0, total_j - epoch_energy_start_j)
             epoch_energy_wh_value = energy_epoch_wh
-            epoch_energy_per_image_j = (
-                energy_epoch_j / global_samples if global_samples > 0 else 0.0
-            )
+            epoch_energy_j_value = energy_epoch_j
             epoch_energy_cost = energy_monitor.get_epoch_cost(energy_epoch_wh)
         if get_world_size() > 1 and dist.is_available() and dist.is_initialized():
             try:
@@ -495,6 +494,11 @@ class Trainer:
                 global_epoch_time = float(time_tensor.item())
             except Exception:
                 pass
+
+        if energy_monitor is not None:
+            epoch_energy_per_image_j = (
+                epoch_energy_j_value / global_samples if global_samples > 0 else 0.0
+            )
 
         if is_main_process():
             self.console.newline()
