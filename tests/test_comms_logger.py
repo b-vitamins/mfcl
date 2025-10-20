@@ -13,7 +13,16 @@ from mfcl.telemetry.comms_logger import (
     CommsLogger,
     close_comms_logger,
     configure_comms_logger,
+    get_comms_logger,
 )
+
+
+def test_configure_comms_logger_requires_log_path(tmp_path):
+    close_comms_logger()
+    logger = configure_comms_logger(enabled=True, log_path=None, is_main=True)
+    assert logger is None
+    assert get_comms_logger() is None
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_comms_logger_enabled_property(tmp_path):
