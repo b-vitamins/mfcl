@@ -19,6 +19,7 @@ from mfcl.metrics.knn import knn_predict
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.utils.dist import (
     get_local_rank,
@@ -313,6 +314,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     nvtx_enabled = bool(runtime_cfg.get("nvtx", False))
 
     step_timer: StepTimer | None = None
+    comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
         if save_dir:
@@ -325,6 +327,17 @@ def _hydra_entry(cfg: DictConfig) -> None:
             nvtx_enabled=nvtx_enabled,
             is_main=is_main_process(),
         )
+
+    comms_cfg = runtime_cfg.get("comms_log", {}) if isinstance(runtime_cfg, dict) else {}
+    comms_enabled = True
+    if isinstance(comms_cfg, dict):
+        comms_enabled = bool(comms_cfg.get("enabled", True))
+    comms_log_path = Path(save_dir) / "comms.csv" if save_dir else None
+    comms_logger = configure_comms_logger(
+        enabled=comms_enabled,
+        log_path=comms_log_path,
+        is_main=is_main_process(),
+    )
 
     trainer = Trainer(
         method,
@@ -356,6 +369,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
     finally:
         if step_timer is not None:
             step_timer.close()
+        if comms_logger is not None:
+            close_comms_logger()
 
     if is_main_process():
         print(f"[done] epoch={conf.train.epochs} save_dir={save_dir}")

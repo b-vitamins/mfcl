@@ -15,6 +15,7 @@ from torchvision import datasets, transforms as T
 from mfcl.core.config import Config, from_omegaconf, validate
 from mfcl.core.factory import build_encoder
 from mfcl.engines.evaluator import LinearProbe
+from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logger
 from mfcl.transforms.common import to_tensor_and_norm
 from mfcl.utils.checkpoint import load_checkpoint
 from mfcl.utils.dist import is_main_process
@@ -161,6 +162,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
     if not os.path.exists(str(ckpt)):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
 
+    base_dir: Path | None = Path(conf.train.save_dir) if conf.train.save_dir else None
+
     if provenance_enabled and is_main_process():
         from mfcl.utils.provenance import (
             append_event,
@@ -168,7 +171,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             write_stable_manifest_once,
         )
 
-        base_dir = Path(conf.train.save_dir) if conf.train.save_dir else Path(str(ckpt)).resolve().parent
+        if base_dir is None:
+            base_dir = Path(str(ckpt)).resolve().parent
         prov_dir = base_dir / "provenance"
         snapshot = collect_provenance(plain_cfg)
         write_stable_manifest_once(prov_dir, snapshot)
@@ -185,48 +189,72 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    encoder = build_encoder(conf)
-    state = load_checkpoint(str(ckpt), strict=True)
-    method_state = state.get("method") if isinstance(state, dict) else None
-    if method_state is None:
-        raise RuntimeError("Checkpoint missing 'method' state")
-    prefixes = ["encoder_q.", "encoder_online.", "f_q.", "encoder.", "module.encoder.", "module.encoder_q."]
-    for prefix in prefixes:
-        keys = [k for k in method_state.keys() if k.startswith(prefix)]
-        if keys:
-            filtered = {k[len(prefix):]: method_state[k] for k in keys}
-            encoder.load_state_dict(filtered, strict=False)
-            break
-    else:
-        encoder.load_state_dict(method_state, strict=False)
-    encoder.eval().requires_grad_(False).to(device)
+    if base_dir is None:
+        base_dir = Path(str(ckpt)).resolve().parent
 
-    train_loader, val_loader, num_classes = _build_eval_loaders(conf)
-
-    linear_cfg = cfg.get("linear", {})
-    milestones = tuple(int(m) for m in linear_cfg.get("milestones", [30, 60]))
-    batch_override = linear_cfg.get("batch_size")
-    probe = LinearProbe(
-        encoder,
-        feature_dim=conf.model.encoder_dim,
-        num_classes=num_classes,
-        device=device,
-        lr=float(linear_cfg.get("lr", 30.0)),
-        epochs=int(linear_cfg.get("epochs", 90)),
-        momentum=float(linear_cfg.get("momentum", 0.9)),
-        weight_decay=float(linear_cfg.get("weight_decay", 0.0)),
-        milestones=milestones,
-        batch_size_override=int(batch_override) if batch_override else None,
-        feature_norm=bool(linear_cfg.get("feature_norm", False)),
-        amp=bool(linear_cfg.get("amp", False)),
-        use_scaler=bool(linear_cfg.get("use_scaler", False)),
+    comms_cfg = runtime_dict.get("comms_log", {}) if isinstance(runtime_dict, dict) else {}
+    comms_enabled = True
+    if isinstance(comms_cfg, dict):
+        comms_enabled = bool(comms_cfg.get("enabled", True))
+    comms_logger = configure_comms_logger(
+        enabled=comms_enabled,
+        log_path=base_dir / "comms.csv" if base_dir is not None else None,
+        is_main=is_main_process(),
     )
 
-    metrics = probe.fit(train_loader, val_loader)
-    if is_main_process():
-        print(
-            f"[linear] top1={metrics['top1'] * 100:.2f} top5={metrics['top5'] * 100:.2f} loss={metrics['loss']:.4f}"
+    try:
+        encoder = build_encoder(conf)
+        state = load_checkpoint(str(ckpt), strict=True)
+        method_state = state.get("method") if isinstance(state, dict) else None
+        if method_state is None:
+            raise RuntimeError("Checkpoint missing 'method' state")
+        prefixes = [
+            "encoder_q.",
+            "encoder_online.",
+            "f_q.",
+            "encoder.",
+            "module.encoder.",
+            "module.encoder_q.",
+        ]
+        for prefix in prefixes:
+            keys = [k for k in method_state.keys() if k.startswith(prefix)]
+            if keys:
+                filtered = {k[len(prefix):]: method_state[k] for k in keys}
+                encoder.load_state_dict(filtered, strict=False)
+                break
+        else:
+            encoder.load_state_dict(method_state, strict=False)
+        encoder.eval().requires_grad_(False).to(device)
+
+        train_loader, val_loader, num_classes = _build_eval_loaders(conf)
+
+        linear_cfg = cfg.get("linear", {})
+        milestones = tuple(int(m) for m in linear_cfg.get("milestones", [30, 60]))
+        batch_override = linear_cfg.get("batch_size")
+        probe = LinearProbe(
+            encoder,
+            feature_dim=conf.model.encoder_dim,
+            num_classes=num_classes,
+            device=device,
+            lr=float(linear_cfg.get("lr", 30.0)),
+            epochs=int(linear_cfg.get("epochs", 90)),
+            momentum=float(linear_cfg.get("momentum", 0.9)),
+            weight_decay=float(linear_cfg.get("weight_decay", 0.0)),
+            milestones=milestones,
+            batch_size_override=int(batch_override) if batch_override else None,
+            feature_norm=bool(linear_cfg.get("feature_norm", False)),
+            amp=bool(linear_cfg.get("amp", False)),
+            use_scaler=bool(linear_cfg.get("use_scaler", False)),
         )
+
+        metrics = probe.fit(train_loader, val_loader)
+        if is_main_process():
+            print(
+                f"[linear] top1={metrics['top1'] * 100:.2f} top5={metrics['top5'] * 100:.2f} loss={metrics['loss']:.4f}"
+            )
+    finally:
+        if comms_logger is not None:
+            close_comms_logger()
 
 
 def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
