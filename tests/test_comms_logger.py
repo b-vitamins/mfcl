@@ -9,7 +9,20 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from mfcl.distributed import all_gather, all_reduce, PayloadCategory
-from mfcl.telemetry.comms_logger import close_comms_logger, configure_comms_logger
+from mfcl.telemetry.comms_logger import (
+    CommsLogger,
+    close_comms_logger,
+    configure_comms_logger,
+)
+
+
+def test_comms_logger_enabled_property(tmp_path):
+    log_path = tmp_path / "comms.csv"
+    logger_with_path = CommsLogger(log_path=log_path)
+    assert logger_with_path.enabled is True
+
+    logger_without_path = CommsLogger(log_path=None)
+    assert logger_without_path.enabled is False
 
 
 def _free_port() -> int:
