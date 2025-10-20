@@ -137,6 +137,7 @@ class StepTimer:
         if self._active:
             self._comm_ms = float(max(0.0, self._comm_ms + value))
 
+    # Public wrappers so callers don't need to remember the internal segment keys.
     def range_forward(self):
         return self._segment_range("forward")
 

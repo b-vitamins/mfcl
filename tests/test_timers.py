@@ -68,6 +68,22 @@ def test_segments_sum_close_to_total(tmp_path):
     assert "outlier_flags" in row
 
 
+def test_named_ranges_exist():
+    timer = StepTimer(
+        enabled=False,
+        warmup_steps=0,
+        sample_rate=1,
+        log_path=None,
+        nvtx_enabled=False,
+        is_main=True,
+    )
+    with timer.range_topr():
+        pass
+    with timer.range_beta_ctrl():
+        pass
+    timer.close()
+
+
 def _run_synthetic_loop(base_dir: Path, enabled: bool) -> float:
     samples_per_step = 64
     steps = 200
