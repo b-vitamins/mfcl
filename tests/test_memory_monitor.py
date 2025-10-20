@@ -1,3 +1,6 @@
+"""Memory monitor tests."""
+
+# Standard library imports for parsing the generated logs.
 import csv
 import json
 import time
