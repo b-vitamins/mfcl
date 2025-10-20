@@ -10,6 +10,7 @@ defaults:
   - linear: default
   - runtime: default
   - fidelity: default
+  - stress: default
   - _self_
 
 hydra:

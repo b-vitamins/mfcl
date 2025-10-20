@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Iterable, Callable
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import LRScheduler as SchedulerBase  # type: ignore
+    from mfcl.telemetry.hardness import HardnessMonitor
 else:
     from torch.optim.lr_scheduler import _LRScheduler as SchedulerBase  # type: ignore
 
@@ -79,6 +80,7 @@ class Trainer:
         energy_monitor: Optional[PowerMonitor] = None,
         budget_tracker: Optional[BudgetTracker] = None,
         fidelity_probe: Any | None = None,
+        hardness_monitor: "HardnessMonitor | None" = None,
     ) -> None:
         """Construct the trainer.
 
@@ -101,6 +103,7 @@ class Trainer:
                 populate view tensors (used for GPU-side augmentation).
             timer: Optional StepTimer for telemetry logging.
             budget_tracker: Optional BudgetTracker enforcing runtime limits.
+            hardness_monitor: Optional HardnessMonitor for top-K negative tracking.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -135,6 +138,7 @@ class Trainer:
         self._fidelity_callback = (
             getattr(fidelity_probe, "maybe_log", None) if fidelity_probe is not None else None
         )
+        self.hardness_monitor = hardness_monitor
         self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
@@ -312,6 +316,7 @@ class Trainer:
         comms_logger = get_comms_logger()
         memory_monitor = self.memory_monitor
         energy_monitor = self.energy_monitor
+        hardness_monitor = self.hardness_monitor
         epoch_energy_start_wh = 0.0
         epoch_energy_start_j = 0.0
         if energy_monitor is not None:
@@ -361,6 +366,11 @@ class Trainer:
                     global_step=self._global_step + 1,
                 )
                 timer.record_data(data_elapsed)
+            if hardness_monitor is not None:
+                hardness_monitor.begin_step(
+                    epoch=epoch,
+                    step=self._global_step + 1,
+                )
             if comms_logger is not None:
                 comms_logger.begin_step(
                     epoch=epoch,
@@ -370,12 +380,16 @@ class Trainer:
                 )
             compute_start = time.time()
             forward_ctx = timer.range_forward() if timer is not None else nullcontext()
-            with forward_ctx:
-                with self.scaler.autocast():
-                    stats = self.method(batch)
-                if "loss" not in stats:
-                    raise KeyError("Method step() must return dict with key 'loss'")
-                loss = stats["loss"]
+            try:
+                with forward_ctx:
+                    with self.scaler.autocast():
+                        stats = self.method(batch)
+                    if "loss" not in stats:
+                        raise KeyError("Method step() must return dict with key 'loss'")
+                    loss = stats["loss"]
+            finally:
+                if hardness_monitor is not None:
+                    hardness_monitor.end_step()
             finite = torch.isfinite(loss.detach())
             if finite.dim() == 0:
                 finite_flag = bool(finite.item())

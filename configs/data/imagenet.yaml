@@ -13,3 +13,8 @@ multiprocessing_context: null
 worker_threads: 1
 pin_memory_device: cuda
 drop_last: true
+class_packed:
+  enabled: false
+  num_classes_per_batch: 16
+  instances_per_class: 2
+  seed: 0

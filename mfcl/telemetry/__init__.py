@@ -12,6 +12,7 @@ from .timers import StepTimer
 from .memory import MemoryMonitor
 from .power import PowerMonitor
 from .fidelity import compare_losses, FidelityProbe
+from .hardness import HardnessMonitor
 
 __all__ = [
     "StepTimer",
@@ -25,4 +26,5 @@ __all__ = [
     "PowerMonitor",
     "compare_losses",
     "FidelityProbe",
+    "HardnessMonitor",
 ]

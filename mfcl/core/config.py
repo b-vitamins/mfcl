@@ -8,8 +8,18 @@ from OmegaConf without requiring Hydra at import time.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Tuple
+
+
+@dataclass
+class ClassPackedConfig:
+    """Options for class-balanced batch sampling."""
+
+    enabled: bool = False
+    num_classes_per_batch: int = 4
+    instances_per_class: int = 2
+    seed: int = 0
 
 
 @dataclass
@@ -39,6 +49,37 @@ class DataConfig:
     synthetic_num_classes: int = 1000
     synthetic_train_size: int = 2048
     synthetic_val_size: int = 512
+    class_packed: ClassPackedConfig = field(default_factory=ClassPackedConfig)
+
+
+@dataclass
+class SyntheticClustersConfig:
+    """Configuration for synthetic clustered embedding generation."""
+
+    enabled: bool = False
+    k: int = 8
+    scale: float = 0.2
+    samples: int = 8192
+    dim: int = 128
+    seed: int = 0
+    output_dir: str | None = None
+
+
+@dataclass
+class HeavyTailConfig:
+    """Configuration for heavy-tail similarity injection diagnostics."""
+
+    enabled: bool = False
+    p_tail: float = 0.1
+    tail_scale: float = 5.0
+
+
+@dataclass
+class StressConfig:
+    """Aggregate stress-testing diagnostics toggles."""
+
+    synthetic_clusters: SyntheticClustersConfig = field(default_factory=SyntheticClustersConfig)
+    heavy_tail: HeavyTailConfig = field(default_factory=HeavyTailConfig)
 
 
 @dataclass
@@ -144,6 +185,7 @@ class Config:
     method: MethodConfig
     optim: OptimConfig
     train: TrainConfig
+    stress: StressConfig
 
 
 def validate(cfg: Config) -> None:
@@ -185,6 +227,15 @@ def validate(cfg: Config) -> None:
             raise ValueError("data.synthetic_train_size must be > 0 for synthetic data")
         if cfg.data.synthetic_val_size <= 0:
             raise ValueError("data.synthetic_val_size must be > 0 for synthetic data")
+
+    class_cfg = getattr(cfg.data, "class_packed", None)
+    if class_cfg is not None:
+        if class_cfg.num_classes_per_batch <= 0:
+            raise ValueError("data.class_packed.num_classes_per_batch must be > 0")
+        if class_cfg.instances_per_class <= 0:
+            raise ValueError("data.class_packed.instances_per_class must be > 0")
+        if class_cfg.seed < 0:
+            raise ValueError("data.class_packed.seed must be >= 0")
 
     if cfg.model.encoder_dim <= 0:
         raise ValueError("model.encoder_dim must be > 0")
@@ -287,6 +338,25 @@ def validate(cfg: Config) -> None:
         if cfg.method.vicreg_nu <= 0:
             raise ValueError("method.vicreg_nu must be > 0 for method.vicreg")
 
+    stress_cfg = getattr(cfg, "stress", None)
+    if stress_cfg is not None:
+        synth_cfg = getattr(stress_cfg, "synthetic_clusters", None)
+        if synth_cfg is not None:
+            if synth_cfg.k <= 0:
+                raise ValueError("stress.synthetic_clusters.k must be > 0")
+            if synth_cfg.scale <= 0:
+                raise ValueError("stress.synthetic_clusters.scale must be > 0")
+            if synth_cfg.samples <= 0:
+                raise ValueError("stress.synthetic_clusters.samples must be > 0")
+            if synth_cfg.dim <= 0:
+                raise ValueError("stress.synthetic_clusters.dim must be > 0")
+        heavy_cfg = getattr(stress_cfg, "heavy_tail", None)
+        if heavy_cfg is not None:
+            if not (0.0 <= heavy_cfg.p_tail <= 1.0):
+                raise ValueError("stress.heavy_tail.p_tail must be in [0, 1]")
+            if heavy_cfg.tail_scale <= 0:
+                raise ValueError("stress.heavy_tail.tail_scale must be > 0")
+
 
 def to_omegaconf(cfg: Config) -> Any:
     """Convert a dataclass-based config to an OmegaConf tree.
@@ -366,12 +436,41 @@ def from_omegaconf(oc: Any) -> Config:
     optim = req("optim")
     train = req("train")
 
-    data_cfg = DataConfig(**data)
+    data_dict = dict(data)
+    cp_cfg_dict = data_dict.pop("class_packed", None)
+    if cp_cfg_dict is None:
+        cp_cfg = ClassPackedConfig()
+    else:
+        if not isinstance(cp_cfg_dict, dict):
+            raise ValueError("data.class_packed must be a mapping when provided")
+        cp_cfg = ClassPackedConfig(**cp_cfg_dict)
+    data_cfg = DataConfig(class_packed=cp_cfg, **data_dict)
     aug_cfg = AugConfig(**aug)
     model_cfg = ModelConfig(**model)
     method_cfg = MethodConfig(**method)
     optim_cfg = OptimConfig(**optim)
     train_cfg = TrainConfig(**train)
+    stress_dict = d.get("stress", {})
+    if stress_dict is None:
+        stress_dict = {}
+    if not isinstance(stress_dict, dict):
+        raise ValueError("stress section must be a mapping when provided")
+    synth_dict = stress_dict.get("synthetic_clusters", {})
+    if synth_dict is None:
+        synth_dict = {}
+    if not isinstance(synth_dict, dict):
+        raise ValueError("stress.synthetic_clusters must be a mapping when provided")
+    heavy_dict = stress_dict.get("heavy_tail", {})
+    if heavy_dict is None:
+        heavy_dict = {}
+    if not isinstance(heavy_dict, dict):
+        raise ValueError("stress.heavy_tail must be a mapping when provided")
+    synth_cfg = SyntheticClustersConfig(**synth_dict)
+    heavy_cfg = HeavyTailConfig(**heavy_dict)
+    stress_cfg = StressConfig(
+        synthetic_clusters=synth_cfg,
+        heavy_tail=heavy_cfg,
+    )
 
     cfg = Config(
         data=data_cfg,
@@ -380,18 +479,23 @@ def from_omegaconf(oc: Any) -> Config:
         method=method_cfg,
         optim=optim_cfg,
         train=train_cfg,
+        stress=stress_cfg,
     )
     validate(cfg)
     return cfg
 
 
 __all__ = [
+    "ClassPackedConfig",
     "DataConfig",
     "AugConfig",
     "ModelConfig",
     "MethodConfig",
     "OptimConfig",
     "TrainConfig",
+    "SyntheticClustersConfig",
+    "HeavyTailConfig",
+    "StressConfig",
     "Config",
     "validate",
     "to_omegaconf",
