@@ -27,6 +27,11 @@ mixture:
   topR: 0                 # 0 = measure only, don't truncate
   pi_floor: 1.0e-3        # floor before normalizing pi for Top-R
   K_subsample: null       # optional chunk size for big-K log-sum-exp
+third_moment:
+  enabled: false
+  rank: 16
+  seed: 41
+  ema_decay: 0.95
 beta_ctrl:
   enabled: false
   target_mix_inflation_eps: 0.05

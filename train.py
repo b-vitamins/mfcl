@@ -48,6 +48,7 @@ from mfcl.utils.dist import (
 from mfcl.utils.seed import set_seed
 from mfcl.mixture.estimator import MixtureStats
 from mfcl.mixture.topr import TopRDiagnostics
+from mfcl.moments.third import ThirdMomentSketch
 
 
 class KNNHook(Hook):
@@ -564,6 +565,30 @@ def _hydra_entry(cfg: DictConfig) -> None:
             chunk_size=chunk_size,
         )
 
+    third_cfg = runtime_cfg.get("third_moment", {}) if isinstance(runtime_cfg, dict) else {}
+    third_moment_sketch: ThirdMomentSketch | None = None
+    if isinstance(third_cfg, dict) and bool(third_cfg.get("enabled", False)):
+        try:
+            rank = int(third_cfg.get("rank", 16))
+        except Exception:
+            rank = 16
+        try:
+            seed = int(third_cfg.get("seed", 41))
+        except Exception:
+            seed = 41
+        try:
+            decay = float(third_cfg.get("ema_decay", 0.95))
+        except Exception:
+            decay = 0.95
+        third_moment_sketch = ThirdMomentSketch(
+            rank=rank,
+            seed=seed,
+            ema_decay=decay,
+            enabled=True,
+            is_main=is_main_process(),
+            log_dir=save_dir,
+        )
+
     beta_ctrl_cfg = runtime_cfg.get("beta_ctrl", {}) if isinstance(runtime_cfg, dict) else {}
     beta_controller: BetaController | None = None
     beta_ctrl_enabled = isinstance(beta_ctrl_cfg, dict) and bool(
@@ -636,6 +661,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         scaler=scaler,
         stability_sentry=stability_sentry,
         beta_controller=beta_controller,
+        third_moment_sketch=third_moment_sketch,
     )
 
     try:
@@ -664,6 +690,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             topr_monitor.close()
         if beta_controller is not None:
             beta_controller.close()
+        if third_moment_sketch is not None:
+            third_moment_sketch.close()
 
     if budget_tracker is not None and save_dir and is_main_process():
         snapshot = budget_tracker.snapshot()
