@@ -346,6 +346,7 @@ def _collect_loss_meta(cfg: Mapping[str, Any]) -> Dict[str, Any]:
 def _collect_diagnostics(cfg: Mapping[str, Any]) -> Dict[str, Any]:
     mixture_cfg = cfg.get("mixture", {}) if isinstance(cfg, Mapping) else {}
     third_cfg = cfg.get("third_moment", {}) if isinstance(cfg, Mapping) else {}
+    beta_ctrl_cfg = cfg.get("beta_ctrl", {}) if isinstance(cfg, Mapping) else {}
     return {
         "mixture": {
             "enabled": bool(mixture_cfg.get("enabled", False)) if isinstance(mixture_cfg, Mapping) else False,
@@ -353,6 +354,14 @@ def _collect_diagnostics(cfg: Mapping[str, Any]) -> Dict[str, Any]:
         },
         "third_moment": {
             "enabled": bool(third_cfg.get("enabled", False)) if isinstance(third_cfg, Mapping) else False,
+        },
+        "beta_ctrl": {
+            "enabled": bool(beta_ctrl_cfg.get("enabled", False))
+            if isinstance(beta_ctrl_cfg, Mapping)
+            else False,
+            "target_eps": beta_ctrl_cfg.get("target_mix_inflation_eps")
+            if isinstance(beta_ctrl_cfg, Mapping)
+            else None,
         },
     }
 

@@ -27,6 +27,7 @@ from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
+from mfcl.runtime.beta_ctrl import BetaController
 from mfcl.mixture.context import _set_active_estimator
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
@@ -85,6 +86,7 @@ class Trainer:
         hardness_monitor: "HardnessMonitor | None" = None,
         stability_sentry: StabilitySentry | None = None,
         mixture_estimator: Any | None = None,
+        beta_controller: Optional[BetaController] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -147,6 +149,7 @@ class Trainer:
         self.hardness_monitor = hardness_monitor
         self.stability_sentry = stability_sentry
         self.mixture_estimator = mixture_estimator
+        self.beta_controller = beta_controller
         self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
@@ -406,6 +409,14 @@ class Trainer:
                         mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
                     except Exception:
                         pass
+                    if self.beta_controller is not None:
+                        try:
+                            self._maybe_update_beta_controller(
+                                epoch=epoch,
+                                global_step=self._global_step + 1,
+                            )
+                        except Exception:
+                            pass
                     _set_active_estimator(None)
             finite = torch.isfinite(loss.detach())
             if finite.dim() == 0:
@@ -664,6 +675,76 @@ class Trainer:
             "energy_per_image_J": epoch_energy_per_image_j,
             "energy_epoch_cost_usd": epoch_energy_cost,
         }
+
+    # ------------------------------------------------------------------
+    # Beta controller helpers
+    # ------------------------------------------------------------------
+    def _beta_ctrl_raw(self) -> float:
+        controller = self.beta_controller
+        base = controller.beta_min if controller is not None else 0.0
+        method_impl = self._method_impl
+        for attr in ("mixture_beta_raw", "mixture_beta", "beta"):
+            if hasattr(method_impl, attr):
+                value = getattr(method_impl, attr)
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        if controller is not None:
+            if controller.last_beta_raw is not None:
+                return float(controller.last_beta_raw)
+            if controller.last_beta is not None:
+                return float(controller.last_beta)
+            return float(controller.beta_max)
+        return float(base)
+
+    def _apply_beta_to_method(self, beta_value: float) -> None:
+        method_impl = self._method_impl
+        if hasattr(method_impl, "set_mixture_beta"):
+            try:
+                method_impl.set_mixture_beta(float(beta_value))
+                return
+            except Exception:
+                pass
+        try:
+            setattr(method_impl, "mixture_beta", float(beta_value))
+        except Exception:
+            pass
+
+    def _maybe_update_beta_controller(self, *, epoch: int, global_step: int) -> None:
+        controller = self.beta_controller
+        estimator = self.mixture_estimator
+        if controller is None or estimator is None:
+            return
+        stats = getattr(estimator, "_last_stats", None)
+        if not isinstance(stats, dict) or not stats:
+            return
+        payload: Dict[str, Any] = {}
+        for key in ("pi", "pi_min", "median_xBx"):
+            if key in stats:
+                payload[key] = stats[key]
+        delta_sigma = stats.get("delta_sigma_max")
+        beta_raw = self._beta_ctrl_raw()
+        timer = self.step_timer
+        ctx = timer.range_beta_ctrl() if timer is not None else nullcontext()
+        with ctx:
+            beta_value, info = controller.step(payload, delta_sigma, beta_raw)
+        if dist.is_available() and dist.is_initialized():
+            try:
+                tensor = torch.tensor(
+                    [beta_value], device=self.device, dtype=torch.float32
+                )
+                dist.broadcast(tensor, src=0)
+                beta_value = float(tensor.item())
+                info["beta_applied"] = beta_value
+                controller._last_beta = beta_value  # type: ignore[attr-defined]
+                if controller._last_info:  # type: ignore[attr-defined]
+                    controller._last_info["beta_applied"] = beta_value  # type: ignore[index]
+            except Exception:
+                pass
+        info["beta_raw"] = beta_raw
+        controller.log_step(step=global_step, epoch=epoch, info=info)
+        self._apply_beta_to_method(beta_value)
 
     def _apply_optimizer_step(
         self,
