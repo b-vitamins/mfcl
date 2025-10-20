@@ -1,1 +1,6 @@
 provenance: true
+nvtx: false
+timing:
+  enabled: true
+  warmup_steps: 50
+  sample_rate: 1

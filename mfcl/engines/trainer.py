@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Iterable, Callable
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -19,6 +20,11 @@ from torch.utils.data import DataLoader
 from mfcl.engines.hooks import Hook, HookList
 from typing import Protocol
 from collections.abc import Iterable as _CIterable
+from mfcl.telemetry.timers import StepTimer
+
+# Global handle for telemetry integrations (e.g., comms logging) to access the
+# active trainer instance without introducing import cycles.
+CURRENT_TRAINER: "Trainer | None" = None
 from mfcl.utils.amp import AmpScaler
 from mfcl.utils.checkpoint import save_checkpoint, load_checkpoint
 from mfcl.utils.consolemonitor import ConsoleMonitor
@@ -64,6 +70,7 @@ class Trainer:
         guard_grad_nan: bool = False,
         channels_last_inputs: bool = False,
         gpu_augmentor: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        timer: Optional[StepTimer] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -84,6 +91,7 @@ class Trainer:
             guard_grad_nan: If True, raise when gradients contain NaN or Inf.
             gpu_augmentor: Optional callable applied to batches after to_device to
                 populate view tensors (used for GPU-side augmentation).
+            timer: Optional StepTimer for telemetry logging.
         """
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
@@ -110,6 +118,7 @@ class Trainer:
         self.guard_grad_nan = bool(guard_grad_nan)
         self.channels_last_inputs = bool(channels_last_inputs)
         self._gpu_augmentor = gpu_augmentor
+        self.step_timer = timer
 
         base_method = unwrap_ddp(self.method)
         base_method.to(self.device)
@@ -141,68 +150,74 @@ class Trainer:
             eval_every: Frequency in epochs to trigger on_eval_end hook with metrics dict.
             save_every: Frequency in epochs to save checkpoints.
         """
-        start_epoch = 1
-        if resume_path and os.path.exists(resume_path):
-            state = load_checkpoint(resume_path, strict=False)
-            if state:
-                start_epoch = max(1, int(state.get("epoch", 0)) + 1)
-                self._restore_checkpoint_state(state)
-
-        self.method.train()
+        global CURRENT_TRAINER
+        prev_trainer = CURRENT_TRAINER
+        CURRENT_TRAINER = self
         try:
-            fn: Any = getattr(self._method_impl, "on_train_start", None)
-            if callable(fn):
-                fn()
-        except Exception:
-            pass
+            start_epoch = 1
+            if resume_path and os.path.exists(resume_path):
+                state = load_checkpoint(resume_path, strict=False)
+                if state:
+                    start_epoch = max(1, int(state.get("epoch", 0)) + 1)
+                    self._restore_checkpoint_state(state)
 
-        world_size = get_world_size()
-        train_state = {
-            "epoch": start_epoch,
-            "global_step": self._global_step,
-            "device": str(self.device),
-            "world_size": world_size,
-            "accum_steps": self.accum_steps,
-            "save_dir": self.save_dir,
-        }
-        self.hooks.on_train_start(train_state)
+            self.method.train()
+            try:
+                fn: Any = getattr(self._method_impl, "on_train_start", None)
+                if callable(fn):
+                    fn()
+            except Exception:
+                pass
 
-        for epoch in range(start_epoch, epochs + 1):
-            train_state["epoch"] = epoch
-            train_state["global_step"] = self._global_step
-            self.hooks.on_epoch_start(epoch, train_state)
-            epoch_metrics = self.train_one_epoch(epoch, train_loader)
-            # Ensure downstream hooks receive the epoch number alongside metrics so
-            # they can align their internal schedules with the trainer state.
-            if "epoch" not in epoch_metrics:
-                epoch_metrics = dict(epoch_metrics)
-                epoch_metrics["epoch"] = epoch
-            train_state["global_step"] = self._global_step
+            world_size = get_world_size()
+            train_state = {
+                "epoch": start_epoch,
+                "global_step": self._global_step,
+                "device": str(self.device),
+                "world_size": world_size,
+                "accum_steps": self.accum_steps,
+                "save_dir": self.save_dir,
+            }
+            self.hooks.on_train_start(train_state)
 
-            # Save checkpoint
-            if is_main_process() and self.save_dir and (epoch % save_every == 0):
-                os.makedirs(self.save_dir, exist_ok=True)
-                ckpt = {
-                    "epoch": epoch,
-                    "global_step": self._global_step,
-                    "method": self.method.state_dict(),
-                    "optimizer": self.optimizer.state_dict(),
-                    "scheduler": self.scheduler.state_dict() if self.scheduler else None,
-                    "scaler": self.scaler.state_dict() if self.scaler else None,
-                    "metrics": epoch_metrics,
-                }
-                path = os.path.join(self.save_dir, f"ckpt_ep{epoch:04d}.pt")
-                save_checkpoint(path, ckpt, keep_k=self.keep_k, make_latest=True)
-                self.hooks.on_checkpoint(path, ckpt)
+            for epoch in range(start_epoch, epochs + 1):
+                train_state["epoch"] = epoch
+                train_state["global_step"] = self._global_step
+                self.hooks.on_epoch_start(epoch, train_state)
+                epoch_metrics = self.train_one_epoch(epoch, train_loader)
+                # Ensure downstream hooks receive the epoch number alongside metrics so
+                # they can align their internal schedules with the trainer state.
+                if "epoch" not in epoch_metrics:
+                    epoch_metrics = dict(epoch_metrics)
+                    epoch_metrics["epoch"] = epoch
+                train_state["global_step"] = self._global_step
 
-            # Eval hook
-            if epoch % eval_every == 0:
-                self.hooks.on_eval_end(epoch_metrics)
+                # Save checkpoint
+                if is_main_process() and self.save_dir and (epoch % save_every == 0):
+                    os.makedirs(self.save_dir, exist_ok=True)
+                    ckpt = {
+                        "epoch": epoch,
+                        "global_step": self._global_step,
+                        "method": self.method.state_dict(),
+                        "optimizer": self.optimizer.state_dict(),
+                        "scheduler": self.scheduler.state_dict() if self.scheduler else None,
+                        "scaler": self.scaler.state_dict() if self.scaler else None,
+                        "metrics": epoch_metrics,
+                    }
+                    path = os.path.join(self.save_dir, f"ckpt_ep{epoch:04d}.pt")
+                    save_checkpoint(path, ckpt, keep_k=self.keep_k, make_latest=True)
+                    self.hooks.on_checkpoint(path, ckpt)
 
-            if self.scheduler and self.scheduler_step_on == "epoch":
-                self.scheduler.step()
+                # Eval hook
+                if epoch % eval_every == 0:
+                    self.hooks.on_eval_end(epoch_metrics)
 
-        barrier()
+                if self.scheduler and self.scheduler_step_on == "epoch":
+                    self.scheduler.step()
+
+            barrier()
+        finally:
+            CURRENT_TRAINER = prev_trainer
 
     def train_one_epoch(
         self, epoch: int, loader: DataLoader | Iterable[Any]
@@ -219,7 +234,10 @@ class Trainer:
 
         from collections.abc import Sized as _Sized
         total = len(loader) if isinstance(loader, _Sized) else 0
-        last_lr = self.optimizer.param_groups[0]["lr"]
+        try:
+            last_lr = float(self.optimizer.param_groups[0]["lr"])
+        except Exception:
+            last_lr = 0.0
         self.optimizer.zero_grad(set_to_none=True)
         # t0 = time.time()
 
@@ -263,11 +281,21 @@ class Trainer:
             data_elapsed = after_move - data_start
             data_time_total += data_elapsed
             h2d_bytes_total += float(self._last_move_bytes)
+            timer = self.step_timer
+            if timer is not None:
+                timer.begin_step(
+                    epoch=epoch,
+                    step_index=step + 1,
+                    global_step=self._global_step + 1,
+                )
+                timer.record_data(data_elapsed)
             if self._gpu_augmentor is not None:
                 batch = self._gpu_augmentor(batch)
             compute_start = time.time()
-            with self.scaler.autocast():
-                stats = self.method(batch)
+            forward_ctx = timer.range_forward() if timer is not None else nullcontext()
+            with forward_ctx:
+                with self.scaler.autocast():
+                    stats = self.method(batch)
                 if "loss" not in stats:
                     raise KeyError("Method step() must return dict with key 'loss'")
                 loss = stats["loss"]
@@ -281,7 +309,9 @@ class Trainer:
                 raise RuntimeError("Loss exploded (non-finite scalar encountered)")
 
             loss_to_backward = loss / self.accum_steps
-            self.scaler.scale(loss_to_backward).backward()
+            backward_ctx = timer.range_backward() if timer is not None else nullcontext()
+            with backward_ctx:
+                self.scaler.scale(loss_to_backward).backward()
 
             # Update running sums for epoch averages
             sum_loss += float(loss.detach().to(torch.float32).item())
@@ -289,12 +319,71 @@ class Trainer:
 
             do_step = ((step + 1) % self.accum_steps) == 0
             if do_step:
-                last_lr = self._apply_optimizer_step(self.accum_steps)
+                optimizer_ctx = (
+                    timer.range_optimizer() if timer is not None else nullcontext()
+                )
+                with optimizer_ctx:
+                    last_lr = self._apply_optimizer_step(self.accum_steps)
 
             # Update meters and console
-            step_end = time.time()
-            compute_elapsed = step_end - compute_start
+            compute_end = time.time()
+            compute_elapsed = compute_end - compute_start
             compute_time_total += compute_elapsed
+            loss_meter.update(float(loss.detach().to(torch.float32).item()))
+
+            misc_ctx = timer.range_misc() if timer is not None else nullcontext()
+            with misc_ctx:
+                self._global_step += 1
+                hook_metrics = self._stats_to_floats(stats)
+                hook_metrics.setdefault(
+                    "loss", float(loss.detach().to(torch.float32).item())
+                )
+                hook_metrics.setdefault("lr", float(last_lr))
+                hook_metrics.setdefault("data_time", data_elapsed)
+                hook_metrics.setdefault("compute_time", compute_elapsed)
+                self.hooks.on_batch_end(self._global_step, hook_metrics)
+
+                should_tail = (total > 0 and step == total - 1)
+                if is_main_process() and (
+                    step % self.log_interval == 0 or should_tail
+                ):
+                    metrics: Dict[str, float] = {
+                        "loss": loss_meter.global_avg,
+                        "lr": float(last_lr),
+                    }
+                    if throughput_meter.count > 0:
+                        metrics["ips"] = throughput_meter.global_avg
+                    for k in (
+                        "pos_sim",
+                        "neg_sim_mean",
+                        "cos_sim",
+                        "diag_mean",
+                        "offdiag_mean",
+                        "mse",
+                        "std_mean",
+                        "cov_offdiag",
+                    ):
+                        v = stats.get(k)
+                        if v is not None:
+                            try:
+                                metrics[k] = float(v.detach().to(torch.float32).item())
+                            except Exception:
+                                continue
+                    self.console.live(
+                        epoch,
+                        step + 1,
+                        total,
+                        metrics,
+                        metric_order=(
+                            "loss",
+                            "lr",
+                            "ips",
+                            "pos_sim",
+                            "neg_sim_mean",
+                        ),
+                    )
+                step_end = time.time()
+
             dt = step_end - data_start
             time_meter.update(dt)
             batch_size = self._infer_batch_size(batch)
@@ -302,56 +391,9 @@ class Trainer:
                 throughput_meter.update(batch_size / dt)
                 samples_seen += batch_size
             epoch_time += dt
-            loss_meter.update(float(loss.detach().to(torch.float32).item()))
-
-            self._global_step += 1
-            hook_metrics = self._stats_to_floats(stats)
-            hook_metrics.setdefault("loss", float(loss.detach().to(torch.float32).item()))
-            hook_metrics.setdefault("lr", float(last_lr))
-            hook_metrics.setdefault("data_time", data_elapsed)
-            hook_metrics.setdefault("compute_time", compute_elapsed)
-            self.hooks.on_batch_end(self._global_step, hook_metrics)
-
-            should_tail = (total > 0 and step == total - 1)
-            if is_main_process() and (
-                step % self.log_interval == 0 or should_tail
-            ):
-                # Pull a few optional stats if present
-                metrics: Dict[str, float] = {
-                    "loss": loss_meter.global_avg,
-                    "lr": float(last_lr),
-                }
-                if throughput_meter.count > 0:
-                    metrics["ips"] = throughput_meter.global_avg
-                for k in (
-                    "pos_sim",
-                    "neg_sim_mean",
-                    "cos_sim",
-                    "diag_mean",
-                    "offdiag_mean",
-                    "mse",
-                    "std_mean",
-                    "cov_offdiag",
-                ):
-                    v = stats.get(k)
-                    if v is not None:
-                        try:
-                            metrics[k] = float(v.detach().to(torch.float32).item())
-                        except Exception:
-                            continue
-                self.console.live(
-                    epoch,
-                    step + 1,
-                    total,
-                    metrics,
-                    metric_order=(
-                        "loss",
-                        "lr",
-                        "ips",
-                        "pos_sim",
-                        "neg_sim_mean",
-                    ),
-                )
+            if timer is not None:
+                ips_value = (batch_size / dt) if (batch_size > 0 and dt > 0) else 0.0
+                timer.end_step(step_time_s=dt, ips=ips_value)
 
             prev_end = step_end
             step += 1
