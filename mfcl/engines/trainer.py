@@ -130,6 +130,7 @@ class Trainer:
         self.memory_monitor = memory_monitor
         self.energy_monitor = energy_monitor
         self.budget_tracker = budget_tracker
+        self._distributed_budget_stop = False
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
         except Exception:
@@ -198,8 +199,15 @@ class Trainer:
             }
             self.hooks.on_train_start(train_state)
 
+            if self.budget_tracker is not None:
+                self._distributed_budget_stop = self.budget_tracker.should_stop()
+            else:
+                self._distributed_budget_stop = False
+
             for epoch in range(start_epoch, epochs + 1):
-                if self.budget_tracker is not None and self.budget_tracker.should_stop():
+                if self.budget_tracker is not None and self._sync_budget_stop_signal(
+                    self.budget_tracker.should_stop()
+                ):
                     break
                 train_state["epoch"] = epoch
                 train_state["global_step"] = self._global_step
@@ -308,7 +316,7 @@ class Trainer:
 
         budget = self.budget_tracker
         while True:
-            if budget is not None and budget.should_stop():
+            if budget is not None and self._sync_budget_stop_signal(budget.should_stop()):
                 break
             data_start = prev_end
             try:
@@ -485,7 +493,7 @@ class Trainer:
                     comm_bytes=int(comm_bytes_total),
                     energy_Wh=energy_delta_wh,
                 )
-                if budget.should_stop():
+                if self._sync_budget_stop_signal(budget.should_stop()):
                     break
 
             if max_steps_override and self._global_step >= max_steps_override:
@@ -638,6 +646,43 @@ class Trainer:
             if did_step:
                 self.scheduler.step()
         return self.optimizer.param_groups[0]["lr"]
+
+    def _sync_budget_stop_signal(self, local_stop: bool) -> bool:
+        """Synchronize budget stop signals across ranks.
+
+        When any process determines the budget has been exhausted we need to
+        propagate that information so that other ranks can exit their training
+        loops promptly and avoid collective deadlocks.
+        """
+
+        stop_flag = bool(local_stop) or self._distributed_budget_stop
+        world = get_world_size()
+        if world <= 1 or not dist.is_available() or not dist.is_initialized():
+            self._distributed_budget_stop = stop_flag
+            return stop_flag
+
+        try:
+            backend = dist.get_backend()
+            backend_name = backend if isinstance(backend, str) else str(backend)
+        except Exception:
+            backend_name = ""
+
+        tensor_device = torch.device("cpu")
+        if backend_name.lower() == "nccl" and hasattr(self.device, "type"):
+            if getattr(self.device, "type", "cpu") == "cuda":
+                tensor_device = self.device
+
+        flag_tensor = torch.tensor(1 if stop_flag else 0, device=tensor_device, dtype=torch.int32)
+        try:
+            dist.all_reduce(flag_tensor, op=dist.ReduceOp.MAX)
+        except Exception:
+            flag_tensor_cpu = flag_tensor.cpu()
+            dist.all_reduce(flag_tensor_cpu, op=dist.ReduceOp.MAX)
+            flag_tensor = flag_tensor_cpu
+
+        stop_flag = bool(flag_tensor.item())
+        self._distributed_budget_stop = stop_flag
+        return stop_flag
 
     @staticmethod
     def _stats_to_floats(stats: Dict[str, Any]) -> Dict[str, float]:
