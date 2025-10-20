@@ -44,8 +44,11 @@ class ThirdMomentSketch:
         self._ema_u: Optional[torch.Tensor] = None
         self._mean: Optional[torch.Tensor] = None
         self._last_summary: Optional[Dict[str, float]] = None
-        self._rng = torch.Generator()
-        self._rng.manual_seed(self.seed)
+        self._rngs: Dict[str, torch.Generator] = {}
+        cpu_device = torch.device("cpu")
+        cpu_generator = torch.Generator(device=cpu_device)
+        cpu_generator.manual_seed(self.seed)
+        self._rngs[str(cpu_device)] = cpu_generator
 
         self._csv_path: Optional[Path] = None
         self._csv_file = None
@@ -209,12 +212,23 @@ class ThirdMomentSketch:
     # ------------------------------------------------------------------
     def _projection_matrix(self, *, device: torch.device, dim: int) -> torch.Tensor:
         if self._projection is None:
-            R = torch.randn(dim, self.rank, generator=self._rng, device=device)
+            generator = self._get_generator(device)
+            R = torch.randn(dim, self.rank, generator=generator, device=device)
             R = F.normalize(R, dim=0)
             self._projection = R.to(torch.float32)
         elif self._projection.device != device:
             self._projection = self._projection.to(device)
         return self._projection
+
+    def _get_generator(self, device: torch.device) -> torch.Generator:
+        torch_device = torch.device(device)
+        key = str(torch_device)
+        generator = self._rngs.get(key)
+        if generator is None:
+            generator = torch.Generator(device=torch_device)
+            generator.manual_seed(self.seed)
+            self._rngs[key] = generator
+        return generator
 
     def _update_ema(self, value: torch.Tensor) -> None:
         if self._ema_u is None:
