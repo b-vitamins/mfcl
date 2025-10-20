@@ -1,0 +1,36 @@
+# Example sweep covering two models under an iso_time budget.
+
+name: spec9_demo
+entrypoint: train.py
+output_dir: runs/spec9_demo
+overrides:
+  - runtime.provenance=true
+env:
+  CUDA_VISIBLE_DEVICES: "0"
+
+grid:
+  - name: resnet18_simclr
+    params:
+      model: resnet18
+      method: simclr
+      batch_size: 128
+      amp_dtype: bf16
+      world_size: 1
+    budget:
+      mode: iso_time
+      limit: 2.5  # minutes
+      target_metric: linear.top1
+      target_value: 70.0
+
+  - name: resnet50_simclr
+    params:
+      model: resnet50
+      method: simclr
+      batch_size: 256
+      amp_dtype: fp16
+      world_size: 1
+    budget:
+      mode: iso_time
+      limit: 2.5
+      target_metric: linear.top1
+      target_value: 70.0
