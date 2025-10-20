@@ -23,6 +23,12 @@ mixture:
   scores_mode: append
   cross_rank: false
   max_assign_iters: 2
+beta_ctrl:
+  enabled: false
+  target_mix_inflation_eps: 0.05
+  beta_min: 3
+  beta_max: 12
+  ema_window: 50
 stability:
   enabled: false
   history_steps: 100

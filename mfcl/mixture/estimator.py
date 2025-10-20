@@ -280,12 +280,33 @@ class MixtureStats:
         mu_diff = mu - global_mu.unsqueeze(0)
         B = torch.einsum("k,kd,ke->de", pi, mu_diff, mu_diff)
 
-        stats = {"pi": pi, "mu": mu, "Sigma": cov, "B": B}
+        xBx = torch.einsum("nd,de,ne->n", embeddings, B, embeddings)
+        if xBx.numel() > 0:
+            median_xBx = torch.median(xBx)
+        else:
+            median_xBx = embeddings.new_tensor(0.0, dtype=B.dtype)
+
+        global_cov = torch.einsum("k,kde->de", pi, cov)
+        delta_sigma = cov - global_cov.unsqueeze(0)
+        if delta_sigma.numel() > 0:
+            delta_sigma_max = torch.linalg.eigvalsh(delta_sigma).abs().max()
+        else:
+            delta_sigma_max = embeddings.new_tensor(0.0, dtype=B.dtype)
+
+        stats = {
+            "pi": pi,
+            "mu": mu,
+            "Sigma": cov,
+            "B": B,
+            "median_xBx": median_xBx,
+            "delta_sigma_max": delta_sigma_max,
+        }
         self._last_stats = {k: v.clone() for k, v in stats.items()}
         return stats
 
     def _apply_ema(self, stats: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         decay = self.ema_decay
+        extras = {k: v.clone() for k, v in stats.items() if k not in {"pi", "mu", "Sigma", "B"}}
         if self._ema_pi is None:
             self._ema_pi = stats["pi"].clone()
             self._ema_mu = stats["mu"].clone()
@@ -302,6 +323,8 @@ class MixtureStats:
             "Sigma": self._ema_sigma.clone(),
             "B": self._ema_B.clone(),
         }
+        if extras:
+            ema_stats.update(extras)
         self._last_stats = {k: v.clone() for k, v in ema_stats.items()}
         return ema_stats
 

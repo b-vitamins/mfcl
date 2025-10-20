@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 from collections.abc import Sized as _Sized
 from pathlib import Path
 from typing import Any, Callable, Dict, Sequence
@@ -36,6 +37,7 @@ from mfcl.telemetry.fidelity import FidelityProbe
 from mfcl.telemetry.hardness import HardnessMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
+from mfcl.runtime.beta_ctrl import BetaController
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -534,6 +536,46 @@ def _hydra_entry(cfg: DictConfig) -> None:
             max_assign_iters=max_iters,
         )
 
+    beta_ctrl_cfg = runtime_cfg.get("beta_ctrl", {}) if isinstance(runtime_cfg, dict) else {}
+    beta_controller: BetaController | None = None
+    beta_ctrl_enabled = isinstance(beta_ctrl_cfg, dict) and bool(
+        beta_ctrl_cfg.get("enabled", False)
+    )
+    mixture_enabled = isinstance(mixture_cfg, dict) and bool(
+        mixture_cfg.get("enabled", False)
+    )
+    if beta_ctrl_enabled and not mixture_enabled:
+        warnings.warn(
+            "runtime.beta_ctrl.enabled is true but runtime.mixture.enabled is false;"
+            " beta control requires mixture statistics.",
+            RuntimeWarning,
+        )
+    if beta_ctrl_enabled and mixture_enabled:
+        try:
+            target_eps = float(beta_ctrl_cfg.get("target_mix_inflation_eps", 0.05))
+        except Exception:
+            target_eps = 0.05
+        try:
+            beta_min = float(beta_ctrl_cfg.get("beta_min", 3.0))
+        except Exception:
+            beta_min = 3.0
+        try:
+            beta_max = float(beta_ctrl_cfg.get("beta_max", 12.0))
+        except Exception:
+            beta_max = 12.0
+        try:
+            ema_window = int(beta_ctrl_cfg.get("ema_window", 50))
+        except Exception:
+            ema_window = 50
+        beta_controller = BetaController(
+            target_eps=target_eps,
+            beta_min=beta_min,
+            beta_max=beta_max,
+            ema_window=ema_window,
+            log_dir=save_dir,
+            is_main=is_main_process(),
+        )
+
     amp_dtype = getattr(conf.train, "amp_dtype", None)
     amp_enabled = bool(getattr(conf.train, "amp", True))
     if isinstance(amp_dtype, str) and amp_dtype.lower() == "fp32":
@@ -564,6 +606,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         mixture_estimator=mixture_estimator,
         scaler=scaler,
         stability_sentry=stability_sentry,
+        beta_controller=beta_controller,
     )
 
     try:
@@ -588,6 +631,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             close_comms_logger()
         if mixture_estimator is not None:
             mixture_estimator.close()
+        if beta_controller is not None:
+            beta_controller.close()
 
     if budget_tracker is not None and save_dir and is_main_process():
         snapshot = budget_tracker.snapshot()
