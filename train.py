@@ -22,6 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from mfcl.telemetry.comms_logger import configure_comms_logger, close_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
+from mfcl.telemetry.power import PowerMonitor
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -316,6 +317,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     step_timer: StepTimer | None = None
     memory_monitor: MemoryMonitor | None = None
+    energy_monitor: PowerMonitor | None = None
     comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
@@ -348,6 +350,30 @@ def _hydra_entry(cfg: DictConfig) -> None:
             is_main=is_main_process(),
         )
 
+    energy_cfg = runtime_cfg.get("energy", {}) if isinstance(runtime_cfg, dict) else {}
+    energy_enabled = False
+    energy_price = 0.25
+    energy_sample = 1.0
+    if isinstance(energy_cfg, dict):
+        energy_enabled = bool(energy_cfg.get("enabled", False))
+        try:
+            energy_price = float(energy_cfg.get("kwh_price_usd", 0.25))
+        except Exception:
+            energy_price = 0.25
+        try:
+            energy_sample = float(energy_cfg.get("sample_interval_s", 1.0))
+        except Exception:
+            energy_sample = 1.0
+    if energy_enabled and save_dir:
+        energy_log_path = Path(save_dir) / "energy.csv"
+        energy_monitor = PowerMonitor(
+            enabled=energy_enabled,
+            log_path=energy_log_path,
+            is_main=is_main_process(),
+            sample_interval_s=energy_sample,
+            kwh_price_usd=energy_price,
+        )
+
     comms_cfg = runtime_cfg.get("comms_log", {}) if isinstance(runtime_cfg, dict) else {}
     comms_enabled = True
     if isinstance(comms_cfg, dict):
@@ -376,6 +402,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         gpu_augmentor=gpu_augmentor,
         timer=step_timer,
         memory_monitor=memory_monitor,
+        energy_monitor=energy_monitor,
     )
 
     try:
@@ -392,6 +419,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             step_timer.close()
         if memory_monitor is not None:
             memory_monitor.close()
+        if energy_monitor is not None:
+            energy_monitor.close()
         if comms_logger is not None:
             close_comms_logger()
 

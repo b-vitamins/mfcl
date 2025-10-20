@@ -10,6 +10,7 @@ from .comms_logger import (
 )
 from .timers import StepTimer
 from .memory import MemoryMonitor
+from .power import PowerMonitor
 
 __all__ = [
     "StepTimer",
@@ -20,4 +21,5 @@ __all__ = [
     "get_comms_logger",
     "close_comms_logger",
     "log_collective",
+    "PowerMonitor",
 ]

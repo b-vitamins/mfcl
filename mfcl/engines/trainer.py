@@ -23,6 +23,7 @@ from collections.abc import Iterable as _CIterable
 from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
+from mfcl.telemetry.power import PowerMonitor
 
 # Global handle for telemetry integrations (e.g., comms logging) to access the
 # active trainer instance without introducing import cycles.
@@ -74,6 +75,7 @@ class Trainer:
         gpu_augmentor: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         timer: Optional[StepTimer] = None,
         memory_monitor: Optional[MemoryMonitor] = None,
+        energy_monitor: Optional[PowerMonitor] = None,
     ) -> None:
         """Construct the trainer.
 
@@ -123,6 +125,7 @@ class Trainer:
         self._gpu_augmentor = gpu_augmentor
         self.step_timer = timer
         self.memory_monitor = memory_monitor
+        self.energy_monitor = energy_monitor
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
         except Exception:
@@ -284,6 +287,11 @@ class Trainer:
 
         comms_logger = get_comms_logger()
         memory_monitor = self.memory_monitor
+        energy_monitor = self.energy_monitor
+        epoch_energy_start_wh = 0.0
+        epoch_energy_start_j = 0.0
+        if energy_monitor is not None:
+            epoch_energy_start_wh, epoch_energy_start_j = energy_monitor.get_totals()
         max_steps_override = self._max_steps_override
 
         while True:
@@ -300,6 +308,12 @@ class Trainer:
             timer = self.step_timer
             if memory_monitor is not None:
                 memory_monitor.update_step_context(
+                    epoch=epoch,
+                    step_index=step + 1,
+                    global_step=self._global_step + 1,
+                )
+            if energy_monitor is not None:
+                energy_monitor.update_step_context(
                     epoch=epoch,
                     step_index=step + 1,
                     global_step=self._global_step + 1,
@@ -455,6 +469,18 @@ class Trainer:
 
         global_samples = float(samples_seen)
         global_epoch_time = float(epoch_time)
+        epoch_energy_wh_value = 0.0
+        epoch_energy_per_image_j = 0.0
+        epoch_energy_cost = 0.0
+        if energy_monitor is not None:
+            total_wh, total_j = energy_monitor.get_totals()
+            energy_epoch_wh = max(0.0, total_wh - epoch_energy_start_wh)
+            energy_epoch_j = max(0.0, total_j - epoch_energy_start_j)
+            epoch_energy_wh_value = energy_epoch_wh
+            epoch_energy_per_image_j = (
+                energy_epoch_j / global_samples if global_samples > 0 else 0.0
+            )
+            epoch_energy_cost = energy_monitor.get_epoch_cost(energy_epoch_wh)
         if get_world_size() > 1 and dist.is_available() and dist.is_initialized():
             try:
                 samples_tensor = torch.tensor(
@@ -485,6 +511,11 @@ class Trainer:
                 summary_metrics["data_time"] = data_time_total / count
                 summary_metrics["compute_time"] = compute_time_total / count
                 summary_metrics["h2d_mb_per_step"] = (h2d_bytes_total / count) / (1024 ** 2)
+            if energy_monitor is not None:
+                summary_metrics["energy_epoch_Wh"] = epoch_energy_wh_value
+                summary_metrics["energy_per_image_J"] = epoch_energy_per_image_j
+                if epoch_energy_cost > 0:
+                    summary_metrics["energy_epoch_cost_usd"] = epoch_energy_cost
             self.console.summary(epoch, summary_metrics)
 
         return {
@@ -500,6 +531,9 @@ class Trainer:
             "h2d_mb_per_step": (h2d_bytes_total / count) / (1024 ** 2)
             if count > 0
             else 0.0,
+            "energy_epoch_Wh": epoch_energy_wh_value,
+            "energy_per_image_J": epoch_energy_per_image_j,
+            "energy_epoch_cost_usd": epoch_energy_cost,
         }
 
     def _apply_optimizer_step(self, micro_batches_in_step: int) -> float:

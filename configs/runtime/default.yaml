@@ -9,3 +9,7 @@ comms_log:
 memory:
   enabled: true
   step_interval: 10
+energy:
+  enabled: false
+  kwh_price_usd: 0.25
+  sample_interval_s: 1.0
