@@ -60,7 +60,7 @@ class CommsLogger:
 
     @property
     def enabled(self) -> bool:
-        return True
+        return self._log_path is not None
 
     def begin_step(
         self,
