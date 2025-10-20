@@ -1,0 +1,12 @@
+synthetic_clusters:
+  enabled: false
+  k: 8
+  scale: 0.2
+  samples: 8192
+  dim: 128
+  seed: 0
+  output_dir: null
+heavy_tail:
+  enabled: false
+  p_tail: 0.1
+  tail_scale: 5.0

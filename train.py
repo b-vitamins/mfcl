@@ -32,6 +32,7 @@ from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
 from mfcl.telemetry.fidelity import FidelityProbe
+from mfcl.telemetry.hardness import HardnessMonitor
 from mfcl.runtime.budget import BudgetTracker
 from mfcl.utils.dist import (
     get_local_rank,
@@ -328,6 +329,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
     step_timer: StepTimer | None = None
     memory_monitor: MemoryMonitor | None = None
     energy_monitor: PowerMonitor | None = None
+    hardness_monitor: HardnessMonitor | None = None
     comms_logger = None
     if timing_enabled:
         log_path: Path | None = None
@@ -382,6 +384,39 @@ def _hydra_entry(cfg: DictConfig) -> None:
             is_main=is_main_process(),
             sample_interval_s=energy_sample,
             kwh_price_usd=energy_price,
+        )
+
+    hardness_cfg = runtime_cfg.get("hardness", {}) if isinstance(runtime_cfg, dict) else {}
+    if isinstance(hardness_cfg, dict) and bool(hardness_cfg.get("enabled", False)):
+        log_path = Path(save_dir) / "hardness.csv" if save_dir else None
+        sample_anchors = int(hardness_cfg.get("sample_anchors", 512))
+        max_negatives = hardness_cfg.get(
+            "sample_negatives", hardness_cfg.get("max_negatives", 4096)
+        )
+        if max_negatives is not None:
+            try:
+                max_negatives = int(max_negatives)
+            except Exception:
+                max_negatives = 4096
+        topk_raw = hardness_cfg.get("topk", (1, 5))
+        if isinstance(topk_raw, (int, float)):
+            topk_vals: Sequence[int] = [int(topk_raw)]
+        elif isinstance(topk_raw, Sequence):
+            topk_vals = [int(x) for x in topk_raw]
+        else:
+            topk_vals = [1, 5]
+        try:
+            monitor_seed = int(hardness_cfg.get("seed", 0))
+        except Exception:
+            monitor_seed = 0
+        hardness_monitor = HardnessMonitor(
+            enabled=True,
+            log_path=log_path,
+            is_main=is_main_process(),
+            max_anchors=sample_anchors,
+            max_negatives=max_negatives if isinstance(max_negatives, int) else None,
+            topk=topk_vals,
+            seed=int(conf.train.seed) + monitor_seed,
         )
 
     comms_cfg = runtime_cfg.get("comms_log", {}) if isinstance(runtime_cfg, dict) else {}
@@ -476,6 +511,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         energy_monitor=energy_monitor,
         budget_tracker=budget_tracker,
         fidelity_probe=fidelity_probe,
+        hardness_monitor=hardness_monitor,
     )
 
     try:
@@ -494,6 +530,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             memory_monitor.close()
         if energy_monitor is not None:
             energy_monitor.close()
+        if hardness_monitor is not None:
+            hardness_monitor.close()
         if comms_logger is not None:
             close_comms_logger()
 

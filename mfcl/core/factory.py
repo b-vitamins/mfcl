@@ -26,6 +26,7 @@ from .config import Config
 from mfcl.methods.base import BaseMethod
 from mfcl.utils.dist import get_rank, get_world_size
 from mfcl.data.sampler import DistSamplerWrapper
+from mfcl.data.samplers import ClassPackedSampler
 
 
 # Public registries. Population happens explicitly near imports in this module
@@ -789,7 +790,31 @@ def build_data(
     distributed = world_size > 1
 
     train_sampler = None
-    if distributed:
+    class_cfg = getattr(cfg.data, "class_packed", None)
+    use_class_packed = bool(getattr(class_cfg, "enabled", False)) if class_cfg else False
+    if use_class_packed:
+        num_classes = int(getattr(class_cfg, "num_classes_per_batch", 0))
+        instances = int(getattr(class_cfg, "instances_per_class", 0))
+        expected_batch = num_classes * instances
+        if expected_batch <= 0:
+            raise ValueError("data.class_packed requires positive classes and instances")
+        if cfg.data.batch_size != expected_batch:
+            raise ValueError(
+                "When data.class_packed.enabled is true, data.batch_size must equal "
+                "num_classes_per_batch * instances_per_class"
+            )
+        base_seed = int(getattr(class_cfg, "seed", 0)) + int(cfg.train.seed)
+        train_sampler = ClassPackedSampler(
+            train_ds,
+            num_classes_per_batch=num_classes,
+            instances_per_class=instances,
+            seed=base_seed,
+            shuffle=cfg.data.shuffle,
+            drop_last=cfg.data.drop_last,
+            num_replicas=world_size if distributed else 1,
+            rank=rank if distributed else 0,
+        )
+    elif distributed:
         train_sampler = DistSamplerWrapper(
             train_ds,
             num_replicas=world_size,

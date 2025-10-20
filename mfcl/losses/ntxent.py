@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mfcl.utils import dist as dist_utils
+from mfcl.telemetry.hardness import get_active_monitor
 from mfcl.losses.base import SelfSupervisedLoss
 
 class NTXentLoss(SelfSupervisedLoss):
@@ -111,11 +112,13 @@ class NTXentLoss(SelfSupervisedLoss):
         loss = 0.5 * (loss_i + loss_j)
         if loss.dtype != torch.float32:
             loss = loss.to(torch.float32)
-        if loss.dtype != torch.float32:
-            loss = loss.to(torch.float32)
 
         pos_sim = torch.diag(sim).mean().detach()
         neg_mask = ~torch.eye(z1f.shape[0], dtype=torch.bool, device=sim.device)
+        monitor = get_active_monitor()
+        if monitor is not None:
+            negatives = sim.detach().to(torch.float32).masked_select(neg_mask).view(z1f.shape[0], -1)
+            monitor.add_negatives(negatives)
         neg_sim_mean = sim.masked_select(neg_mask).mean().detach()
         stats = {"pos_sim": pos_sim, "neg_sim_mean": neg_sim_mean}
         return loss, stats
@@ -170,6 +173,14 @@ class NTXentLoss(SelfSupervisedLoss):
             neg_vals.append(sim_i.masked_select(mask_i))
         if mask_j.any():
             neg_vals.append(sim_j.masked_select(mask_j))
+        monitor = get_active_monitor()
+        if monitor is not None:
+            if mask_i.any():
+                vals_i = sim_i.detach().to(torch.float32).masked_select(mask_i).view(B, -1)
+                monitor.add_negatives(vals_i)
+            if mask_j.any():
+                vals_j = sim_j.detach().to(torch.float32).masked_select(mask_j).view(B, -1)
+                monitor.add_negatives(vals_j)
         if neg_vals:
             neg_sim_mean = torch.cat(neg_vals).mean().detach()
         else:
@@ -194,10 +205,6 @@ class NTXentLoss(SelfSupervisedLoss):
         loss = F.cross_entropy(logits, targets)
         if loss.dtype != torch.float32:
             loss = loss.to(torch.float32)
-        if loss.dtype != torch.float32:
-            loss = loss.to(torch.float32)
-        if loss.dtype != torch.float32:
-            loss = loss.to(torch.float32)
 
         diag_pos = torch.diag(sim_full, diagonal=B)
         diag_pos_rev = torch.diag(sim_full, diagonal=-B)
@@ -207,6 +214,10 @@ class NTXentLoss(SelfSupervisedLoss):
         pos_mask[:B, B:] = torch.eye(B, dtype=torch.bool, device=sim_full.device)
         pos_mask[B:, :B] = torch.eye(B, dtype=torch.bool, device=sim_full.device)
         neg_mask = (~eye) & (~pos_mask)
+        monitor = get_active_monitor()
+        if monitor is not None:
+            neg_values = sim_full.detach().to(torch.float32).masked_select(neg_mask).view(sim_full.shape[0], -1)
+            monitor.add_negatives(neg_values)
         neg_sim_mean = sim_full.masked_select(neg_mask).mean().detach()
         stats = {"pos_sim": pos_sim, "neg_sim_mean": neg_sim_mean}
         return loss, stats
@@ -254,7 +265,8 @@ class NTXentLoss(SelfSupervisedLoss):
             [offset + idx + world_B, offset + idx], dim=0
         )
         loss = F.cross_entropy(logits, targets)
-
+        if loss.dtype != torch.float32:
+            loss = loss.to(torch.float32)
         pos_vals = torch.cat(
             [torch.sum(z1f * z2f, dim=1), torch.sum(z2f * z1f, dim=1)]
         )
@@ -271,6 +283,14 @@ class NTXentLoss(SelfSupervisedLoss):
             neg_parts.append(sim_i.masked_select(mask_i))
         if mask_j.any():
             neg_parts.append(sim_j.masked_select(mask_j))
+        monitor = get_active_monitor()
+        if monitor is not None:
+            if mask_i.any():
+                vals_i = sim_i.detach().to(torch.float32).masked_select(mask_i).view(B, -1)
+                monitor.add_negatives(vals_i)
+            if mask_j.any():
+                vals_j = sim_j.detach().to(torch.float32).masked_select(mask_j).view(B, -1)
+                monitor.add_negatives(vals_j)
         if neg_parts:
             neg_sim_mean = torch.cat(neg_parts).mean().detach()
         else:

@@ -13,6 +13,7 @@ from mfcl.models.heads.projector import Projector
 from mfcl.utils.ema import MomentumUpdater
 from mfcl.utils.queue import RingQueue
 from mfcl.utils import dist as dist_utils
+from mfcl.telemetry.hardness import get_active_monitor
 
 
 class MoCo(BaseMethod):
@@ -149,6 +150,9 @@ class MoCo(BaseMethod):
         if negf.numel() > 0:
             neg_logits = qf @ negf.t()
             neg_sim_mean = neg_logits.mean().detach()
+            monitor = get_active_monitor()
+            if monitor is not None:
+                monitor.add_negatives(neg_logits.detach().to(torch.float32))
         else:
             neg_logits = qf.new_empty((qf.size(0), 0))
             neg_sim_mean = qf.new_zeros(())
