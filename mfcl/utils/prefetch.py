@@ -98,6 +98,7 @@ class PrefetchLoader(Iterable[Any]):
         self._streams: list[torch.cuda.Stream] = []
         self._queue: deque[tuple[torch.cuda.Stream, Any]] = deque()
         self._next_stream_idx = 0
+        self._has_iterated = False
 
     def __enter__(self) -> "PrefetchLoader":
         """Return ``self`` so instances can be used as context managers.
@@ -140,6 +141,7 @@ class PrefetchLoader(Iterable[Any]):
 
         self.close()
         self._iterator = iter(self.loader)
+        self._has_iterated = True
         self._streams = [
             torch.cuda.Stream(device=self.device) for _ in range(self.prefetch_depth)
         ]
@@ -163,7 +165,7 @@ class PrefetchLoader(Iterable[Any]):
 
         if not self._queue:
             if self._iterator is None:
-                if not self._streams:
+                if not self._has_iterated:
                     raise RuntimeError("PrefetchLoader was not iterated")
                 self.close()
                 raise StopIteration
