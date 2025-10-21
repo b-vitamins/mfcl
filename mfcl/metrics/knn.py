@@ -38,12 +38,15 @@ def knn_predict(
     sim = feats @ bank.t()  # [B,N]
     vals, idx = torch.topk(sim, k=k, dim=1)  # [B,k]
     weights = torch.softmax(vals / float(temperature), dim=1)  # [B,k]
-    neighbor_labels = bank_labels[idx]  # [B,k]
-
-    C = int(bank_labels.max().item()) + 1
-    if (bank_labels < 0).any():
+    unique_labels, inverse_labels = torch.unique(
+        bank_labels, sorted=True, return_inverse=True
+    )
+    if unique_labels.min() < 0:
         raise ValueError("bank_labels must be non-negative integer class ids")
-    one_hot = F.one_hot(neighbor_labels, num_classes=C).to(weights.dtype)  # [B,k,C]
+    neighbor_labels = inverse_labels[idx]  # [B,k]
+
+    num_classes = int(unique_labels.numel())
+    one_hot = F.one_hot(neighbor_labels, num_classes=num_classes).to(weights.dtype)  # [B,k,C]
     class_votes = (one_hot * weights.unsqueeze(-1)).sum(dim=1)  # [B,C]
     class_votes = class_votes / (class_votes.sum(dim=1, keepdim=True) + 1e-12)
     return class_votes
