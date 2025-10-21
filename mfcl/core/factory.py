@@ -253,6 +253,36 @@ def build_encoder(cfg: Config) -> nn.Module:
     return encoder
 
 
+def _build_projector(cfg: Config) -> nn.Module:
+    """Construct a single standard projector head."""
+
+    proj_ctor = HEAD_REGISTRY.get("projector")
+    return proj_ctor(
+        cfg.model.encoder_dim,
+        cfg.model.projector_hidden,
+        cfg.model.projector_out,
+        use_bn=True,
+    )
+
+
+def _build_projectors(cfg: Config, count: int) -> List[nn.Module]:
+    """Construct ``count`` projector heads."""
+
+    return [_build_projector(cfg) for _ in range(max(0, count))]
+
+
+def _build_predictor(cfg: Config) -> nn.Module:
+    """Construct the standard predictor head."""
+
+    pred_ctor = HEAD_REGISTRY.get("predictor")
+    return pred_ctor(
+        cfg.model.projector_out,
+        cfg.model.predictor_hidden,
+        cfg.model.predictor_out,
+        use_bn=True,
+    )
+
+
 def build_heads(cfg: Config) -> Dict[str, nn.Module]:
     """Build projector and, if required, predictor heads.
 
@@ -268,13 +298,7 @@ def build_heads(cfg: Config) -> Dict[str, nn.Module]:
     """
     heads: Dict[str, nn.Module] = {}
     # Projector is always needed for SSL methods in this repo.
-    proj_ctor = HEAD_REGISTRY.get("projector")
-    heads["projector"] = proj_ctor(
-        cfg.model.encoder_dim,
-        cfg.model.projector_hidden,
-        cfg.model.projector_out,
-        use_bn=True,
-    )
+    heads["projector"] = _build_projector(cfg)
 
     method_name = cfg.method.name
     method = method_name.lower()
@@ -282,13 +306,7 @@ def build_heads(cfg: Config) -> Dict[str, nn.Module]:
     needs_predictor = method in {"byol", "simsiam"}
     # Allow methods to override by requesting predictor explicitly via constructor.
     if needs_predictor:
-        pred_ctor = HEAD_REGISTRY.get("predictor")
-        heads["predictor"] = pred_ctor(
-            cfg.model.projector_out,
-            cfg.model.predictor_hidden,
-            cfg.model.predictor_out,
-            use_bn=True,
-        )
+        heads["predictor"] = _build_predictor(cfg)
     return heads
 
 
@@ -434,13 +452,7 @@ def build_method(cfg: Config) -> BaseMethod:
     loss_fp32 = getattr(cfg.train, "loss_fp32", True)
     if name == "simclr":
         encoder = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        projector = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
+        projector = _build_projector(cfg)
         from mfcl.methods.simclr import SimCLR
 
         return SimCLR(
@@ -456,19 +468,7 @@ def build_method(cfg: Config) -> BaseMethod:
     if name == "moco":
         enc_q = build_encoder(cfg)
         enc_k = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        proj_q = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
-        proj_k = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
+        proj_q, proj_k = _build_projectors(cfg, 2)
         if cfg.method.use_syncbn:
             convert = torch.nn.SyncBatchNorm.convert_sync_batchnorm
             enc_q = convert(enc_q)
@@ -501,27 +501,8 @@ def build_method(cfg: Config) -> BaseMethod:
     if name == "byol":
         f_q = build_encoder(cfg)
         f_k = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        g_q = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
-        g_k = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
-        from mfcl.models.heads.predictor import Predictor
-
-        q = Predictor(
-            cfg.model.projector_out,
-            cfg.model.predictor_hidden,
-            cfg.model.predictor_out,
-            use_bn=True,
-        )
+        g_q, g_k = _build_projectors(cfg, 2)
+        q = _build_predictor(cfg)
         from mfcl.methods.byol import BYOL
 
         return BYOL(
@@ -541,21 +522,8 @@ def build_method(cfg: Config) -> BaseMethod:
 
     if name == "simsiam":
         encoder = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        projector = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
-        from mfcl.models.heads.predictor import Predictor
-
-        predictor = Predictor(
-            cfg.model.projector_out,
-            cfg.model.predictor_hidden,
-            cfg.model.predictor_out,
-            use_bn=True,
-        )
+        projector = _build_projector(cfg)
+        predictor = _build_predictor(cfg)
         from mfcl.methods.simsiam import SimSiam
 
         return SimSiam(
@@ -568,13 +536,7 @@ def build_method(cfg: Config) -> BaseMethod:
 
     if name == "barlow":
         encoder = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        projector = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
+        projector = _build_projector(cfg)
         from mfcl.methods.barlow import BarlowTwins
 
         return BarlowTwins(
@@ -586,13 +548,7 @@ def build_method(cfg: Config) -> BaseMethod:
 
     if name == "vicreg":
         encoder = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        projector = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
+        projector = _build_projector(cfg)
         from mfcl.methods.vicreg import VICReg
 
         return VICReg(
@@ -606,13 +562,7 @@ def build_method(cfg: Config) -> BaseMethod:
 
     if name == "swav":
         encoder = build_encoder(cfg)
-        proj_ctor = HEAD_REGISTRY.get("projector")
-        projector = proj_ctor(
-            cfg.model.encoder_dim,
-            cfg.model.projector_hidden,
-            cfg.model.projector_out,
-            use_bn=True,
-        )
+        projector = _build_projector(cfg)
         from mfcl.models.prototypes.swavproto import SwAVPrototypes
 
         prototypes = SwAVPrototypes(
