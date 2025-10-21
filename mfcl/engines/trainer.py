@@ -6,7 +6,8 @@ import logging
 import os
 import time
 from contextlib import nullcontext
-from typing import Any, Dict, Optional, Iterable, Callable
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Iterable, Callable, Iterator
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torch.optim.lr_scheduler import LRScheduler as SchedulerBase  # type: ignore
@@ -22,6 +23,7 @@ from torch.utils.data import DataLoader
 from mfcl.engines.hooks import Hook, HookList
 from typing import Protocol
 from collections.abc import Iterable as _CIterable
+from collections.abc import Sized as _Sized
 from mfcl.telemetry.comms_logger import get_comms_logger
 from mfcl.telemetry.timers import StepTimer
 from mfcl.telemetry.memory import MemoryMonitor
@@ -60,6 +62,49 @@ class _TrainableMethod(Protocol):
     def __call__(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def step(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def on_optimizer_step(self) -> None: ...
+
+
+@dataclass
+class _EpochState:
+    epoch: int
+    iterator: Iterator[Any]
+    total: int
+    loss_meter: SmoothedValue
+    time_meter: SmoothedValue
+    throughput_meter: SmoothedValue
+    last_lr: float
+    sum_loss: float
+    count: int
+    samples_seen: int
+    epoch_time: float
+    data_time_total: float
+    compute_time_total: float
+    h2d_bytes_total: float
+    prev_end: float
+    step: int
+    comms_logger: Any | None
+    memory_monitor: MemoryMonitor | None
+    energy_monitor: PowerMonitor | None
+    hardness_monitor: "HardnessMonitor | None"
+    mix_estimator: Any | None
+    third_sketch: Any | None
+    epoch_energy_start_wh: float
+    epoch_energy_start_j: float
+    step_energy_prev_wh: float
+    max_steps_override: int
+    budget: BudgetTracker | None
+    fidelity_cb: Callable[..., Any] | None
+    timer: StepTimer | None
+
+
+@dataclass
+class _StepContext:
+    batch: Dict[str, Any]
+    data_start: float
+    data_elapsed: float
+    compute_start: float
+    tokens_this_step: int
+    timer: StepTimer | None
 
 
 def _log_exception(
@@ -319,25 +364,36 @@ class Trainer:
         Returns:
             Dict of averaged metrics for the epoch (includes 'loss' and 'lr').
         """
+
+        state = self._start_epoch(epoch, loader)
+
+        while True:
+            step_ctx = self._prepare_step(epoch, state)
+            if step_ctx is None:
+                break
+
+            stats, loss = self._execute_step(epoch, state, step_ctx)
+            loss_scalar = self._backward_and_update(epoch, state, step_ctx, stats, loss)
+
+            if self._finalize_step(epoch, state, step_ctx, stats, loss, loss_scalar):
+                break
+
+        return self._finish_epoch(epoch, state)
+
+    def _start_epoch(
+        self, epoch: int, loader: DataLoader | Iterable[Any]
+    ) -> _EpochState:
         self.method.train()
         loss_meter = SmoothedValue(window=50)
         time_meter = SmoothedValue(window=50)
         throughput_meter = SmoothedValue(window=50)
 
-        from collections.abc import Sized as _Sized
         total = len(loader) if isinstance(loader, _Sized) else 0
         try:
             last_lr = float(self.optimizer.param_groups[0]["lr"])
         except Exception:
             last_lr = 0.0
         self.optimizer.zero_grad(set_to_none=True)
-        # t0 = time.time()
-
-        # Running sums for epoch-level reduction
-        sum_loss = 0.0
-        count = 0
-        samples_seen = 0
-        epoch_time = 0.0
 
         if is_main_process():
             self.console.epoch_start(epoch, total)
@@ -356,17 +412,17 @@ class Trainer:
                 _log_exception("batch_sampler.set_epoch", exc, epoch=epoch)
 
         iterator = iter(loader)
-        step = 0
         prev_end = time.time()
-        data_time_total = 0.0
-        compute_time_total = 0.0
-        h2d_bytes_total = 0.0
 
         comms_logger = get_comms_logger()
         memory_monitor = self.memory_monitor
         energy_monitor = self.energy_monitor
         hardness_monitor = self.hardness_monitor
-        mix_estimator = self.mixture_estimator if getattr(self.mixture_estimator, "enabled", False) else None
+        mix_estimator = (
+            self.mixture_estimator
+            if getattr(self.mixture_estimator, "enabled", False)
+            else None
+        )
         third_sketch = (
             self.third_moment if getattr(self.third_moment, "enabled", False) else None
         )
@@ -375,376 +431,475 @@ class Trainer:
         if energy_monitor is not None:
             epoch_energy_start_wh, epoch_energy_start_j = energy_monitor.get_totals()
         step_energy_prev_wh = epoch_energy_start_wh
-        max_steps_override = self._max_steps_override
 
-        budget = self.budget_tracker
-        fidelity_cb = self._fidelity_callback
-        while True:
-            if budget is not None and self._sync_budget_stop_signal(budget.should_stop()):
-                break
-            data_start = prev_end
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                break
-            batch = self.to_device(batch)
-            after_move = time.time()
-            data_elapsed = after_move - data_start
-            data_time_total += data_elapsed
-            h2d_bytes_total += float(self._last_move_bytes)
-            timer = self.step_timer
-            if self._gpu_augmentor is not None:
-                batch = self._gpu_augmentor(batch)
-            tokens_this_step = 0
-            if budget is not None:
-                tokens_this_step = self._count_tokens(batch)
-                exceeds_budget = budget.would_exceed(step_samples=tokens_this_step)
-                should_stop = bool(exceeds_budget)
-                if dist.is_available() and dist.is_initialized():
-                    try:
-                        should_stop = self._sync_budget_stop_signal(exceeds_budget)
-                    except Exception:
-                        self._distributed_budget_stop = (
-                            self._distributed_budget_stop or bool(exceeds_budget)
-                        )
-                        should_stop = self._distributed_budget_stop
-                elif exceeds_budget:
+        return _EpochState(
+            epoch=epoch,
+            iterator=iterator,
+            total=total,
+            loss_meter=loss_meter,
+            time_meter=time_meter,
+            throughput_meter=throughput_meter,
+            last_lr=last_lr,
+            sum_loss=0.0,
+            count=0,
+            samples_seen=0,
+            epoch_time=0.0,
+            data_time_total=0.0,
+            compute_time_total=0.0,
+            h2d_bytes_total=0.0,
+            prev_end=prev_end,
+            step=0,
+            comms_logger=comms_logger,
+            memory_monitor=memory_monitor,
+            energy_monitor=energy_monitor,
+            hardness_monitor=hardness_monitor,
+            mix_estimator=mix_estimator,
+            third_sketch=third_sketch,
+            epoch_energy_start_wh=epoch_energy_start_wh,
+            epoch_energy_start_j=epoch_energy_start_j,
+            step_energy_prev_wh=step_energy_prev_wh,
+            max_steps_override=self._max_steps_override,
+            budget=self.budget_tracker,
+            fidelity_cb=self._fidelity_callback,
+            timer=self.step_timer,
+        )
+
+    def _prepare_step(self, epoch: int, state: _EpochState) -> _StepContext | None:
+        budget = state.budget
+        if budget is not None and self._sync_budget_stop_signal(budget.should_stop()):
+            return None
+
+        data_start = state.prev_end
+        try:
+            batch = next(state.iterator)
+        except StopIteration:
+            return None
+
+        batch = self.to_device(batch)
+        after_move = time.time()
+        data_elapsed = after_move - data_start
+        state.data_time_total += data_elapsed
+        state.h2d_bytes_total += float(self._last_move_bytes)
+
+        timer = state.timer
+        if self._gpu_augmentor is not None:
+            batch = self._gpu_augmentor(batch)
+
+        tokens_this_step = 0
+        if budget is not None:
+            tokens_this_step = self._count_tokens(batch)
+            exceeds_budget = budget.would_exceed(step_samples=tokens_this_step)
+            should_stop = bool(exceeds_budget)
+            if dist.is_available() and dist.is_initialized():
+                try:
+                    should_stop = self._sync_budget_stop_signal(exceeds_budget)
+                except Exception:
+                    self._distributed_budget_stop = (
+                        self._distributed_budget_stop or bool(exceeds_budget)
+                    )
+                    should_stop = self._distributed_budget_stop
+            elif exceeds_budget:
+                self._distributed_budget_stop = True
+            if exceeds_budget or should_stop:
+                if not (dist.is_available() and dist.is_initialized()):
                     self._distributed_budget_stop = True
-                if exceeds_budget or should_stop:
-                    if not (dist.is_available() and dist.is_initialized()):
-                        self._distributed_budget_stop = True
-                    break
-            if memory_monitor is not None:
-                memory_monitor.update_step_context(
-                    epoch=epoch,
-                    step_index=step + 1,
-                    global_step=self._global_step + 1,
-                )
-            if energy_monitor is not None:
-                energy_monitor.update_step_context(
-                    epoch=epoch,
-                    step_index=step + 1,
-                    global_step=self._global_step + 1,
-                )
-            if timer is not None:
-                timer.begin_step(
-                    epoch=epoch,
-                    step_index=step + 1,
-                    global_step=self._global_step + 1,
-                )
-                timer.record_data(data_elapsed)
-            if hardness_monitor is not None:
-                hardness_monitor.begin_step(
-                    epoch=epoch,
-                    step=self._global_step + 1,
-                )
-            if mix_estimator is not None:
-                _set_active_estimator(mix_estimator)
-                if third_sketch is not None:
-                    try:
-                        stats = getattr(mix_estimator, "_last_stats", None)
-                        if (
-                            isinstance(stats, dict)
-                            and "pi" in stats
-                            and "mu" in stats
-                        ):
-                            pi = stats["pi"].detach().to(torch.float32)
-                            mu = stats["mu"].detach().to(torch.float32)
-                            if pi.ndim == 1 and mu.ndim == 2 and mu.shape[0] == pi.shape[0]:
-                                global_mu = (pi.unsqueeze(1) * mu).sum(dim=0)
-                                third_sketch.set_mean(global_mu.cpu())
-                    except Exception as exc:
-                        _log_exception(
-                            "third_moment.set_mean",
-                            exc,
-                            epoch=epoch,
-                            step=self._global_step + 1,
-                        )
+                return None
+
+        step_index = state.step + 1
+        global_step = self._global_step + 1
+
+        memory_monitor = state.memory_monitor
+        if memory_monitor is not None:
+            memory_monitor.update_step_context(
+                epoch=epoch,
+                step_index=step_index,
+                global_step=global_step,
+            )
+        energy_monitor = state.energy_monitor
+        if energy_monitor is not None:
+            energy_monitor.update_step_context(
+                epoch=epoch,
+                step_index=step_index,
+                global_step=global_step,
+            )
+        if timer is not None:
+            timer.begin_step(
+                epoch=epoch,
+                step_index=step_index,
+                global_step=global_step,
+            )
+            timer.record_data(data_elapsed)
+
+        hardness_monitor = state.hardness_monitor
+        if hardness_monitor is not None:
+            hardness_monitor.begin_step(
+                epoch=epoch,
+                step=global_step,
+            )
+
+        mix_estimator = state.mix_estimator
+        third_sketch = state.third_sketch
+        if mix_estimator is not None:
+            _set_active_estimator(mix_estimator)
             if third_sketch is not None:
-                _set_active_sketch(third_sketch)
-            if comms_logger is not None:
-                comms_logger.begin_step(
-                    epoch=epoch,
-                    step_index=step + 1,
-                    global_step=self._global_step + 1,
-                    timer=timer,
-                )
-            compute_start = time.time()
-            forward_ctx = timer.range_forward() if timer is not None else nullcontext()
-            try:
-                with forward_ctx:
-                    with self.scaler.autocast():
-                        stats = self.method(batch)
-                    if "loss" not in stats:
-                        raise KeyError("Method step() must return dict with key 'loss'")
-                    loss = stats["loss"]
-                    if self.topr_monitor is not None:
-                        try:
-                            self._maybe_update_topr(
-                                epoch=epoch,
-                                global_step=self._global_step + 1,
-                            )
-                        except Exception as exc:
-                            _log_exception(
-                                "topr_monitor.update",
-                                exc,
-                                epoch=epoch,
-                                step=self._global_step + 1,
-                            )
-            finally:
-                if hardness_monitor is not None:
-                    hardness_monitor.end_step()
-                if mix_estimator is not None:
-                    try:
-                        mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
-                    except Exception as exc:
-                        _log_exception(
-                            "mixture_estimator.log_step",
-                            exc,
-                            epoch=epoch,
-                            step=self._global_step + 1,
-                        )
-                if third_sketch is not None:
-                    try:
-                        third_sketch.log_step(
-                            step=self._global_step + 1, epoch=epoch
-                        )
-                    except Exception as exc:
-                        _log_exception(
-                            "third_moment.log_step",
-                            exc,
-                            epoch=epoch,
-                            step=self._global_step + 1,
-                        )
+                try:
+                    stats = getattr(mix_estimator, "_last_stats", None)
+                    if (
+                        isinstance(stats, dict)
+                        and "pi" in stats
+                        and "mu" in stats
+                    ):
+                        pi = stats["pi"].detach().to(torch.float32)
+                        mu = stats["mu"].detach().to(torch.float32)
+                        if pi.ndim == 1 and mu.ndim == 2 and mu.shape[0] == pi.shape[0]:
+                            global_mu = (pi.unsqueeze(1) * mu).sum(dim=0)
+                            third_sketch.set_mean(global_mu.cpu())
+                except Exception as exc:
+                    _log_exception(
+                        "third_moment.set_mean",
+                        exc,
+                        epoch=epoch,
+                        step=global_step,
+                    )
+        if third_sketch is not None:
+            _set_active_sketch(third_sketch)
+
+        if state.comms_logger is not None:
+            state.comms_logger.begin_step(
+                epoch=epoch,
+                step_index=step_index,
+                global_step=global_step,
+                timer=timer,
+            )
+
+        compute_start = time.time()
+
+        return _StepContext(
+            batch=batch,
+            data_start=data_start,
+            data_elapsed=data_elapsed,
+            compute_start=compute_start,
+            tokens_this_step=tokens_this_step,
+            timer=timer,
+        )
+
+    def _execute_step(
+        self,
+        epoch: int,
+        state: _EpochState,
+        step_ctx: _StepContext,
+    ) -> tuple[Dict[str, Any], torch.Tensor]:
+        timer = step_ctx.timer
+        forward_ctx = timer.range_forward() if timer is not None else nullcontext()
+        try:
+            with forward_ctx:
+                with self.scaler.autocast():
+                    stats = self.method(step_ctx.batch)
+                if "loss" not in stats:
+                    raise KeyError("Method step() must return dict with key 'loss'")
+                loss = stats["loss"]
                 if self.topr_monitor is not None:
                     try:
-                        self.topr_monitor.log_step(
-                            step=self._global_step + 1, epoch=epoch
-                        )
-                    except Exception as exc:
-                        _log_exception(
-                            "topr_monitor.log_step",
-                            exc,
-                            epoch=epoch,
-                            step=self._global_step + 1,
-                        )
-                if self.beta_controller is not None:
-                    try:
-                        self._maybe_update_beta_controller(
+                        self._maybe_update_topr(
                             epoch=epoch,
                             global_step=self._global_step + 1,
                         )
                     except Exception as exc:
                         _log_exception(
-                            "beta_controller.update",
+                            "topr_monitor.update",
                             exc,
                             epoch=epoch,
                             step=self._global_step + 1,
                         )
-                _set_active_estimator(None)
-                if third_sketch is not None:
-                    _set_active_sketch(None)
-            finite = torch.isfinite(loss.detach())
-            if finite.dim() == 0:
-                finite_flag = bool(finite.item())
-            else:
-                finite_flag = bool(finite.all().item())
-            if self.stability_sentry is not None:
-                self.stability_sentry.check_loss(
-                    loss,
-                    batch=batch,
-                    optimizer=self.optimizer,
-                    scaler=self.scaler,
-                    step=self._global_step + 1,
-                    epoch=epoch,
-                )
-            if not finite_flag:
-                self.console.newline()
-                raise RuntimeError("Loss exploded (non-finite scalar encountered)")
-
-            loss_to_backward = loss / self.accum_steps
-            backward_ctx = timer.range_backward() if timer is not None else nullcontext()
-            with backward_ctx:
-                self.scaler.scale(loss_to_backward).backward()
-
-            # Update running sums for epoch averages
-            sum_loss += float(loss.detach().to(torch.float32).item())
-            count += 1
-
-            do_step = ((step + 1) % self.accum_steps) == 0
-            if do_step:
-                optimizer_ctx = (
-                    timer.range_optimizer() if timer is not None else nullcontext()
-                )
-                with optimizer_ctx:
-                    last_lr = self._apply_optimizer_step(
-                        self.accum_steps,
+        finally:
+            hardness_monitor = state.hardness_monitor
+            if hardness_monitor is not None:
+                hardness_monitor.end_step()
+            mix_estimator = state.mix_estimator
+            if mix_estimator is not None:
+                try:
+                    mix_estimator.log_step(
+                        step=self._global_step + 1, epoch=epoch
+                    )
+                except Exception as exc:
+                    _log_exception(
+                        "mixture_estimator.log_step",
+                        exc,
+                        epoch=epoch,
+                        step=self._global_step + 1,
+                    )
+            third_sketch = state.third_sketch
+            if third_sketch is not None:
+                try:
+                    third_sketch.log_step(
+                        step=self._global_step + 1, epoch=epoch
+                    )
+                except Exception as exc:
+                    _log_exception(
+                        "third_moment.log_step",
+                        exc,
+                        epoch=epoch,
+                        step=self._global_step + 1,
+                    )
+            if self.topr_monitor is not None:
+                try:
+                    self.topr_monitor.log_step(
+                        step=self._global_step + 1, epoch=epoch
+                    )
+                except Exception as exc:
+                    _log_exception(
+                        "topr_monitor.log_step",
+                        exc,
+                        epoch=epoch,
+                        step=self._global_step + 1,
+                    )
+            if self.beta_controller is not None:
+                try:
+                    self._maybe_update_beta_controller(
                         epoch=epoch,
                         global_step=self._global_step + 1,
-                        batch=batch,
                     )
-
-            # Update meters and console
-            compute_end = time.time()
-            compute_elapsed = compute_end - compute_start
-            compute_time_total += compute_elapsed
-            loss_meter.update(float(loss.detach().to(torch.float32).item()))
-
-            misc_ctx = timer.range_misc() if timer is not None else nullcontext()
-            with misc_ctx:
-                self._global_step += 1
-                hook_metrics = self._stats_to_floats(stats)
-                hook_metrics.setdefault(
-                    "loss", float(loss.detach().to(torch.float32).item())
-                )
-                hook_metrics.setdefault("lr", float(last_lr))
-                hook_metrics.setdefault("data_time", data_elapsed)
-                hook_metrics.setdefault("compute_time", compute_elapsed)
-                self.hooks.on_batch_end(self._global_step, hook_metrics)
-                if fidelity_cb is not None:
-                    try:
-                        fidelity_cb(
-                            step=self._global_step,
-                            epoch=epoch,
-                            batch=batch,
-                            model=self.method,
-                        )
-                    except Exception as exc:
-                        _log_exception(
-                            "fidelity_probe.maybe_log",
-                            exc,
-                            epoch=epoch,
-                            step=self._global_step,
-                        )
-
-                if memory_monitor is not None:
-                    memory_monitor.record_step_snapshot(
+                except Exception as exc:
+                    _log_exception(
+                        "beta_controller.update",
+                        exc,
                         epoch=epoch,
-                        global_step=self._global_step,
+                        step=self._global_step + 1,
+                    )
+            _set_active_estimator(None)
+            if state.third_sketch is not None:
+                _set_active_sketch(None)
+
+        return stats, loss
+
+    def _backward_and_update(
+        self,
+        epoch: int,
+        state: _EpochState,
+        step_ctx: _StepContext,
+        stats: Dict[str, Any],
+        loss: torch.Tensor,
+    ) -> float:
+        finite = torch.isfinite(loss.detach())
+        if finite.dim() == 0:
+            finite_flag = bool(finite.item())
+        else:
+            finite_flag = bool(finite.all().item())
+        if self.stability_sentry is not None:
+            self.stability_sentry.check_loss(
+                loss,
+                batch=step_ctx.batch,
+                optimizer=self.optimizer,
+                scaler=self.scaler,
+                step=self._global_step + 1,
+                epoch=epoch,
+            )
+        if not finite_flag:
+            self.console.newline()
+            raise RuntimeError("Loss exploded (non-finite scalar encountered)")
+
+        loss_to_backward = loss / self.accum_steps
+        timer = step_ctx.timer
+        backward_ctx = timer.range_backward() if timer is not None else nullcontext()
+        with backward_ctx:
+            self.scaler.scale(loss_to_backward).backward()
+
+        loss_scalar = float(loss.detach().to(torch.float32).item())
+        state.sum_loss += loss_scalar
+        state.count += 1
+
+        do_step = ((state.step + 1) % self.accum_steps) == 0
+        if do_step:
+            optimizer_ctx = (
+                timer.range_optimizer() if timer is not None else nullcontext()
+            )
+            with optimizer_ctx:
+                state.last_lr = self._apply_optimizer_step(
+                    self.accum_steps,
+                    epoch=epoch,
+                    global_step=self._global_step + 1,
+                    batch=step_ctx.batch,
+                )
+
+        return loss_scalar
+
+    def _finalize_step(
+        self,
+        epoch: int,
+        state: _EpochState,
+        step_ctx: _StepContext,
+        stats: Dict[str, Any],
+        loss: torch.Tensor,
+        loss_scalar: float,
+    ) -> bool:
+        compute_end = time.time()
+        compute_elapsed = compute_end - step_ctx.compute_start
+        state.compute_time_total += compute_elapsed
+        state.loss_meter.update(loss_scalar)
+
+        timer = step_ctx.timer
+        misc_ctx = timer.range_misc() if timer is not None else nullcontext()
+        with misc_ctx:
+            self._global_step += 1
+            hook_metrics = self._stats_to_floats(stats)
+            hook_metrics.setdefault("loss", loss_scalar)
+            hook_metrics.setdefault("lr", float(state.last_lr))
+            hook_metrics.setdefault("data_time", step_ctx.data_elapsed)
+            hook_metrics.setdefault("compute_time", compute_elapsed)
+            self.hooks.on_batch_end(self._global_step, hook_metrics)
+
+            fidelity_cb = state.fidelity_cb
+            if fidelity_cb is not None:
+                try:
+                    fidelity_cb(
+                        step=self._global_step,
+                        epoch=epoch,
+                        batch=step_ctx.batch,
+                        model=self.method,
+                    )
+                except Exception as exc:
+                    _log_exception(
+                        "fidelity_probe.maybe_log",
+                        exc,
+                        epoch=epoch,
+                        step=self._global_step,
                     )
 
-                should_tail = (total > 0 and step == total - 1)
-                if is_main_process() and (
-                    step % self.log_interval == 0 or should_tail
+            memory_monitor = state.memory_monitor
+            if memory_monitor is not None:
+                memory_monitor.record_step_snapshot(
+                    epoch=epoch,
+                    global_step=self._global_step,
+                )
+
+            should_tail = state.total > 0 and state.step == state.total - 1
+            if is_main_process() and (
+                state.step % self.log_interval == 0 or should_tail
+            ):
+                metrics: Dict[str, float] = {
+                    "loss": state.loss_meter.global_avg,
+                    "lr": float(state.last_lr),
+                }
+                if state.throughput_meter.count > 0:
+                    metrics["ips"] = state.throughput_meter.global_avg
+                for k in (
+                    "pos_sim",
+                    "neg_sim_mean",
+                    "cos_sim",
+                    "diag_mean",
+                    "offdiag_mean",
+                    "mse",
+                    "std_mean",
+                    "cov_offdiag",
                 ):
-                    metrics: Dict[str, float] = {
-                        "loss": loss_meter.global_avg,
-                        "lr": float(last_lr),
-                    }
-                    if throughput_meter.count > 0:
-                        metrics["ips"] = throughput_meter.global_avg
-                    for k in (
+                    v = stats.get(k)
+                    if v is not None:
+                        try:
+                            metrics[k] = float(v.detach().to(torch.float32).item())
+                        except Exception:
+                            continue
+                self.console.live(
+                    epoch,
+                    state.step + 1,
+                    state.total,
+                    metrics,
+                    metric_order=(
+                        "loss",
+                        "lr",
+                        "ips",
                         "pos_sim",
                         "neg_sim_mean",
-                        "cos_sim",
-                        "diag_mean",
-                        "offdiag_mean",
-                        "mse",
-                        "std_mean",
-                        "cov_offdiag",
-                    ):
-                        v = stats.get(k)
-                        if v is not None:
-                            try:
-                                metrics[k] = float(v.detach().to(torch.float32).item())
-                            except Exception:
-                                continue
-                    self.console.live(
-                        epoch,
-                        step + 1,
-                        total,
-                        metrics,
-                        metric_order=(
-                            "loss",
-                            "lr",
-                            "ips",
-                            "pos_sim",
-                            "neg_sim_mean",
-                        ),
-                    )
-                step_end = time.time()
-
-            dt = step_end - data_start
-            time_meter.update(dt)
-            batch_size = self._infer_batch_size(batch)
-            if batch_size > 0 and dt > 0:
-                throughput_meter.update(batch_size / dt)
-                samples_seen += batch_size
-            epoch_time += dt
-            if timer is not None:
-                ips_value = (batch_size / dt) if (batch_size > 0 and dt > 0) else 0.0
-                timer.end_step(step_time_s=dt, ips=ips_value)
-            comm_bytes_total = 0.0
-            if comms_logger is not None:
-                comms_logger.end_step()
-                totals = comms_logger.pop_last_step_totals()
-                if totals is not None:
-                    comm_bytes_total = float(totals.get("bytes_total", 0.0))
-
-            if self.stability_sentry is not None:
-                try:
-                    loss_value = float(loss.detach().to(torch.float32).item())
-                except Exception:
-                    loss_value = float("nan")
-                self.stability_sentry.record_step(
-                    step=self._global_step,
-                    epoch=epoch,
-                    loss=loss_value,
-                    step_time_s=dt,
-                    comm_bytes=comm_bytes_total,
+                    ),
                 )
+            step_end = time.time()
 
-            prev_end = step_end
-            step += 1
+        dt = step_end - step_ctx.data_start
+        state.time_meter.update(dt)
+        batch_size = self._infer_batch_size(step_ctx.batch)
+        if batch_size > 0 and dt > 0:
+            state.throughput_meter.update(batch_size / dt)
+            state.samples_seen += batch_size
+        state.epoch_time += dt
 
-            energy_delta_wh = 0.0
-            if energy_monitor is not None:
-                total_wh, _ = energy_monitor.get_totals()
-                energy_delta_wh = max(0.0, total_wh - step_energy_prev_wh)
-                step_energy_prev_wh = total_wh
-            if budget is not None:
-                budget.update(
-                    step_samples=tokens_this_step,
-                    step_wall_ms=dt * 1000.0,
-                    comm_bytes=int(comm_bytes_total),
-                    energy_Wh=energy_delta_wh,
-                )
-                if self._sync_budget_stop_signal(budget.should_stop()):
-                    break
+        if timer is not None:
+            ips_value = (batch_size / dt) if (batch_size > 0 and dt > 0) else 0.0
+            timer.end_step(step_time_s=dt, ips=ips_value)
 
-            if max_steps_override and self._global_step >= max_steps_override:
-                break
+        comm_bytes_total = 0.0
+        if state.comms_logger is not None:
+            state.comms_logger.end_step()
+            totals = state.comms_logger.pop_last_step_totals()
+            if totals is not None:
+                comm_bytes_total = float(totals.get("bytes_total", 0.0))
 
-        # Flush gradients if the final micro-batch count does not evenly divide the
-        # accumulation factor. Without this step, the trailing micro-batches would
-        # never update the model parameters and would leak into the next epoch.
-        if count > 0 and (count % self.accum_steps) != 0:
-            last_lr = self._apply_optimizer_step(
-                count % self.accum_steps,
+        if self.stability_sentry is not None:
+            try:
+                loss_value = float(loss.detach().to(torch.float32).item())
+            except Exception:
+                loss_value = float("nan")
+            self.stability_sentry.record_step(
+                step=self._global_step,
+                epoch=epoch,
+                loss=loss_value,
+                step_time_s=dt,
+                comm_bytes=comm_bytes_total,
+            )
+
+        state.prev_end = step_end
+        state.step += 1
+
+        energy_delta_wh = 0.0
+        if state.energy_monitor is not None:
+            total_wh, _ = state.energy_monitor.get_totals()
+            energy_delta_wh = max(0.0, total_wh - state.step_energy_prev_wh)
+            state.step_energy_prev_wh = total_wh
+
+        budget = state.budget
+        if budget is not None:
+            budget.update(
+                step_samples=step_ctx.tokens_this_step,
+                step_wall_ms=dt * 1000.0,
+                comm_bytes=int(comm_bytes_total),
+                energy_Wh=energy_delta_wh,
+            )
+            if self._sync_budget_stop_signal(budget.should_stop()):
+                return True
+
+        if state.max_steps_override and self._global_step >= state.max_steps_override:
+            return True
+
+        return False
+
+    def _finish_epoch(self, epoch: int, state: _EpochState) -> Dict[str, float]:
+        if state.count > 0 and (state.count % self.accum_steps) != 0:
+            state.last_lr = self._apply_optimizer_step(
+                state.count % self.accum_steps,
                 epoch=epoch,
                 global_step=self._global_step,
                 batch=None,
             )
 
-        # Epoch-level reduce (loss)
         reduce_map = {
-            "sum_loss": torch.tensor(sum_loss, device=self.device),
-            "count": torch.tensor(count, device=self.device),
+            "sum_loss": torch.tensor(state.sum_loss, device=self.device),
+            "count": torch.tensor(state.count, device=self.device),
         }
         if get_world_size() > 1:
             reduce_map = reduce_dict(reduce_map, op="sum")  # type: ignore[assignment]
-        epoch_loss = (reduce_map["sum_loss"] / (reduce_map["count"] + 1e-12)).item()
+        epoch_loss = (
+            reduce_map["sum_loss"] / (reduce_map["count"] + 1e-12)
+        ).item()
 
-        global_samples = float(samples_seen)
-        global_epoch_time = float(epoch_time)
+        global_samples = float(state.samples_seen)
+        global_epoch_time = float(state.epoch_time)
         epoch_energy_wh_value = 0.0
         epoch_energy_per_image_j = 0.0
         epoch_energy_cost = 0.0
         energy_epoch_j = 0.0
+        energy_monitor = state.energy_monitor
         if energy_monitor is not None:
             total_wh, total_j = energy_monitor.get_totals()
-            energy_epoch_wh = max(0.0, total_wh - epoch_energy_start_wh)
-            energy_epoch_j = max(0.0, total_j - epoch_energy_start_j)
+            energy_epoch_wh = max(0.0, total_wh - state.epoch_energy_start_wh)
+            energy_epoch_j = max(0.0, total_j - state.epoch_energy_start_j)
             epoch_energy_wh_value = energy_epoch_wh
             epoch_energy_cost = energy_monitor.get_epoch_cost(energy_epoch_wh)
         if get_world_size() > 1 and dist.is_available() and dist.is_initialized():
@@ -775,17 +930,27 @@ class Trainer:
             self.console.newline()
             summary_metrics = {
                 "loss": epoch_loss,
-                "lr": float(last_lr),
-                "time_per_batch": time_meter.global_avg,
+                "lr": float(state.last_lr),
+                "time_per_batch": state.time_meter.global_avg,
             }
-            if epoch_time > 0 and samples_seen > 0:
-                summary_metrics["imgs_per_sec"] = samples_seen / epoch_time
+            if state.epoch_time > 0 and state.samples_seen > 0:
+                summary_metrics["imgs_per_sec"] = (
+                    state.samples_seen / state.epoch_time
+                )
             if global_epoch_time > 0 and global_samples > 0:
-                summary_metrics["global_imgs_per_sec"] = global_samples / global_epoch_time
-            if count > 0:
-                summary_metrics["data_time"] = data_time_total / count
-                summary_metrics["compute_time"] = compute_time_total / count
-                summary_metrics["h2d_mb_per_step"] = (h2d_bytes_total / count) / (1024 ** 2)
+                summary_metrics["global_imgs_per_sec"] = (
+                    global_samples / global_epoch_time
+                )
+            if state.count > 0:
+                summary_metrics["data_time"] = (
+                    state.data_time_total / state.count
+                )
+                summary_metrics["compute_time"] = (
+                    state.compute_time_total / state.count
+                )
+                summary_metrics["h2d_mb_per_step"] = (
+                    (state.h2d_bytes_total / state.count) / (1024 ** 2)
+                )
             if energy_monitor is not None:
                 summary_metrics["energy_epoch_Wh"] = epoch_energy_wh_value
                 summary_metrics["energy_per_image_J"] = epoch_energy_per_image_j
@@ -795,16 +960,24 @@ class Trainer:
 
         return {
             "loss": float(epoch_loss),
-            "lr": float(last_lr),
-            "time_per_batch": float(time_meter.global_avg),
-            "imgs_per_sec": float(samples_seen / epoch_time) if epoch_time > 0 else 0.0,
-            "global_imgs_per_sec": float(global_samples / global_epoch_time)
-            if global_epoch_time > 0
+            "lr": float(state.last_lr),
+            "time_per_batch": float(state.time_meter.global_avg),
+            "imgs_per_sec": (
+                float(state.samples_seen / state.epoch_time)
+                if state.epoch_time > 0
+                else 0.0
+            ),
+            "global_imgs_per_sec": (
+                float(global_samples / global_epoch_time)
+                if global_epoch_time > 0
+                else 0.0
+            ),
+            "data_time": state.data_time_total / state.count if state.count > 0 else 0.0,
+            "compute_time": state.compute_time_total / state.count
+            if state.count > 0
             else 0.0,
-            "data_time": data_time_total / count if count > 0 else 0.0,
-            "compute_time": compute_time_total / count if count > 0 else 0.0,
-            "h2d_mb_per_step": (h2d_bytes_total / count) / (1024 ** 2)
-            if count > 0
+            "h2d_mb_per_step": (state.h2d_bytes_total / state.count) / (1024 ** 2)
+            if state.count > 0
             else 0.0,
             "energy_epoch_Wh": epoch_energy_wh_value,
             "energy_per_image_J": epoch_energy_per_image_j,
