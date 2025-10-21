@@ -61,11 +61,10 @@ class ImageListDataset(Dataset):
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image not found at index {idx}: {path}")
         with Image.open(path) as img:
-            img_converted = img.convert("RGB")
-            img_copy = img_converted.copy()
+            converted_img = img.convert("RGB").copy()
         if self.transform is None:
-            return {"img": img_copy}, idx
-        out = self.transform(img_copy)
+            return {"img": converted_img}, idx
+        out = self.transform(converted_img)
         if isinstance(out, dict):
             return out, idx
         return {"input": out}, idx
