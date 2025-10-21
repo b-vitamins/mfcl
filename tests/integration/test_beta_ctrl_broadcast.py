@@ -27,6 +27,55 @@ class _DummyMethod(torch.nn.Module):
         return {"loss": self.weight.sum()}
 
 
+class _ToyMethod(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, batch):
+        value = batch["value"].to(self.weight.device)
+        loss = ((self.weight * value) ** 2).mean()
+        return {"loss": loss}
+
+    def step(self, batch):
+        return self.forward(batch)
+
+
+class _ToyIterable:
+    def __init__(self, length: int) -> None:
+        self.length = length
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __iter__(self):
+        for _ in range(self.length):
+            yield {"value": torch.ones(1)}
+
+
+class _RankTriggeredBudget:
+    def __init__(self, trigger_rank: int, trigger_after_steps: int) -> None:
+        self._trigger_rank = trigger_rank
+        self._trigger_after = trigger_after_steps
+        self.completed_steps = 0
+
+    def should_stop(self) -> bool:
+        return False
+
+    def would_exceed(self, step_samples: int = 0, **kwargs) -> bool:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        return self.completed_steps >= self._trigger_after and rank == self._trigger_rank
+
+    def update(
+        self,
+        step_samples: int,
+        step_wall_ms: float,
+        comm_bytes: int = 0,
+        energy_Wh: float = 0.0,
+    ) -> None:
+        self.completed_steps += 1
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("", 0))
@@ -86,3 +135,46 @@ def test_beta_controller_broadcasts_beta_across_ranks():
     world_size = 2
     port = _free_port()
     mp.spawn(_worker, args=(world_size, port), nprocs=world_size, join=True)
+
+
+def _budget_worker(rank: int, world_size: int, port: int) -> None:
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
+
+    try:
+        init_distributed(backend="gloo")
+        method = _ToyMethod()
+        optimizer = torch.optim.SGD(method.parameters(), lr=0.01)
+        budget = _RankTriggeredBudget(trigger_rank=0, trigger_after_steps=1)
+        trainer = Trainer(
+            method,
+            optimizer,
+            console=ConsoleMonitor(),
+            device=torch.device("cpu"),
+            budget_tracker=budget,
+        )
+
+        loader = _ToyIterable(length=4)
+        trainer.train_one_epoch(epoch=0, loader=loader)
+
+        steps = trainer._global_step
+        gathered: List[int] = [0] * world_size
+        dist.all_gather_object(gathered, steps)
+        if rank == 0:
+            base = gathered[0]
+            assert base == 1
+            for value in gathered[1:]:
+                assert value == base
+    finally:
+        cleanup()
+
+
+@pytest.mark.dist
+@pytest.mark.skipif(not dist.is_available(), reason="torch.distributed unavailable")
+def test_budget_stop_signal_synchronizes_across_ranks():
+    world_size = 2
+    port = _free_port()
+    mp.spawn(_budget_worker, args=(world_size, port), nprocs=world_size, join=True)
