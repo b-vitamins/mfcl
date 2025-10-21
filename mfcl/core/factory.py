@@ -14,7 +14,7 @@ import warnings
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Sampler
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # static typing: use public base for compatibility
     from torch.optim.lr_scheduler import LRScheduler as SchedulerBase  # type: ignore
@@ -31,6 +31,7 @@ from mfcl.data.samplers import ClassPackedSampler
 
 # Public registries. Population happens explicitly near imports in this module
 # or by external code importing and adding entries, but never implicitly.
+DATASET_REGISTRY = Registry("dataset")
 ENCODER_REGISTRY = Registry("encoder")
 HEAD_REGISTRY = Registry("head")
 METHOD_REGISTRY = Registry("method")
@@ -637,7 +638,7 @@ def _build_eval_transforms(cfg: Config) -> Callable:
     )
 
 
-def _wrap_tensor_transform(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
+def _wrap_tensor_transform(fn: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
     """Ensure tensor inputs are converted to PIL before applying ``fn``."""
 
     if fn is None:
@@ -663,7 +664,9 @@ def _wrap_tensor_transform(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
 
 
 def _build_synthetic_datasets(
-    cfg: Config, transform: Callable[[Any], Any], eval_transform: Callable[[Any], Any]
+    cfg: Config,
+    transform: Callable[[Any], Any],
+    eval_transform: Callable[[Any], Any] | None,
 ) -> Tuple[Any, Any]:
     try:
         from torchvision.datasets import FakeData
@@ -673,7 +676,7 @@ def _build_synthetic_datasets(
         ) from exc
 
     wrapped_train = _wrap_tensor_transform(transform)
-    wrapped_eval = _wrap_tensor_transform(eval_transform)
+    wrapped_eval = _wrap_tensor_transform(eval_transform or transform)
 
     train_ds = FakeData(
         size=int(cfg.data.synthetic_train_size),
@@ -688,6 +691,131 @@ def _build_synthetic_datasets(
         transform=wrapped_eval,
     )
     return train_ds, val_ds
+
+
+def _build_imagenet_dataset(
+    cfg: Config,
+    transform: Callable[[Any], Any],
+    eval_transform: Callable[[Any], Any] | None,
+) -> Tuple[Dataset[Any], Optional[Dataset[Any]]]:
+    from mfcl.data.imagenet1k import build_imagenet_datasets
+
+    return build_imagenet_datasets(
+        root=cfg.data.root,
+        train_list=cfg.data.train_list,
+        val_list=cfg.data.val_list,
+        train_transform=transform,
+        val_transform=eval_transform,
+    )
+
+
+DATASET_REGISTRY.add("imagenet", _build_imagenet_dataset)
+DATASET_REGISTRY.add("synthetic", _build_synthetic_datasets)
+
+
+def build_dataset(
+    cfg: Config,
+    transform: Callable[[Any], Any],
+    eval_transform: Callable[[Any], Any] | None = None,
+) -> Tuple[Dataset[Any], Optional[Dataset[Any]]]:
+    """Instantiate train and optional validation datasets via registry."""
+
+    dataset_name = getattr(cfg.data, "name", "imagenet")
+    builder = DATASET_REGISTRY.get(str(dataset_name).lower())
+    return builder(cfg, transform, eval_transform)
+
+
+def build_sampler(
+    cfg: Config,
+    dataset: Dataset[Any],
+    *,
+    world_size: int,
+    rank: int,
+) -> Optional[Sampler[int]]:
+    """Return sampler honoring class-packed and distributed settings."""
+
+    class_cfg = getattr(cfg.data, "class_packed", None)
+    use_class_packed = bool(getattr(class_cfg, "enabled", False)) if class_cfg else False
+    if use_class_packed:
+        num_classes = int(getattr(class_cfg, "num_classes_per_batch", 0))
+        instances = int(getattr(class_cfg, "instances_per_class", 0))
+        expected_batch = num_classes * instances
+        if expected_batch <= 0:
+            raise ValueError("data.class_packed requires positive classes and instances")
+        if cfg.data.batch_size != expected_batch:
+            raise ValueError(
+                "When data.class_packed.enabled is true, data.batch_size must equal "
+                "num_classes_per_batch * instances_per_class"
+            )
+        base_seed = int(getattr(class_cfg, "seed", 0)) + int(cfg.train.seed)
+        replicas = max(1, int(world_size))
+        return ClassPackedSampler(
+            dataset,
+            num_classes_per_batch=num_classes,
+            instances_per_class=instances,
+            seed=base_seed,
+            shuffle=cfg.data.shuffle,
+            drop_last=cfg.data.drop_last,
+            num_replicas=replicas,
+            rank=int(rank) if replicas > 1 else 0,
+        )
+
+    if world_size > 1:
+        return DistSamplerWrapper(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=cfg.data.shuffle,
+            seed=cfg.train.seed,
+            drop_last=cfg.data.drop_last,
+        )
+
+    return None
+
+
+def build_loader(
+    cfg: Config,
+    dataset: Dataset[Any],
+    *,
+    sampler: Optional[Sampler[int]] = None,
+    collate_fn: Optional[Callable[[Any], Any]] = None,
+    shuffle: Optional[bool] = None,
+    drop_last: Optional[bool] = None,
+    batch_size: Optional[int] = None,
+) -> DataLoader:
+    """Construct a ``DataLoader`` honoring worker and pinning options."""
+
+    persist_workers = cfg.data.persistent_workers and cfg.data.num_workers > 0
+
+    loader_kwargs: Dict[str, Any] = {}
+    if cfg.data.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = int(max(1, cfg.data.prefetch_factor))
+        loader_kwargs["worker_init_fn"] = _make_worker_init_fn(cfg.data.worker_threads)
+    if cfg.data.multiprocessing_context:
+        loader_kwargs["multiprocessing_context"] = cfg.data.multiprocessing_context
+
+    pin_device = cfg.data.pin_memory_device
+    if not torch.cuda.is_available():
+        pin_device = None
+    if cfg.data.pin_memory and pin_device:
+        loader_kwargs["pin_memory_device"] = pin_device
+
+    effective_shuffle = cfg.data.shuffle if shuffle is None else bool(shuffle)
+    effective_drop_last = cfg.data.drop_last if drop_last is None else bool(drop_last)
+    effective_batch_size = cfg.data.batch_size if batch_size is None else int(batch_size)
+
+    return DataLoader(
+        dataset,
+        batch_size=effective_batch_size,
+        shuffle=False if sampler is not None else effective_shuffle,
+        sampler=sampler,
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=persist_workers,
+        drop_last=effective_drop_last,
+        collate_fn=collate_fn,
+        **loader_kwargs,
+    )
 
 
 def build_data(
@@ -712,19 +840,7 @@ def build_data(
     transform = build_transforms(cfg)
     eval_transform = _build_eval_transforms(cfg)
 
-    dataset_kind = getattr(cfg.data, "name", "imagenet").lower()
-    if dataset_kind == "synthetic":
-        train_ds, val_ds = _build_synthetic_datasets(cfg, transform, eval_transform)
-    else:
-        from mfcl.data.imagenet1k import build_imagenet_datasets
-
-        train_ds, val_ds = build_imagenet_datasets(
-            root=cfg.data.root,
-            train_list=cfg.data.train_list,
-            val_list=cfg.data.val_list,
-            train_transform=transform,
-            val_transform=eval_transform,
-        )
+    train_ds, val_ds = build_dataset(cfg, transform, eval_transform)
 
     # Collate selection depends on method
     if cfg.method.name == "swav":
@@ -732,87 +848,28 @@ def build_data(
     else:
         from mfcl.data.collate import collate_pair as collate_fn
 
-    persist_workers = cfg.data.persistent_workers and cfg.data.num_workers > 0
-    # PyTorch forbids persistent_workers=True when num_workers==0.
-
     world_size = get_world_size()
     rank = get_rank()
-    distributed = world_size > 1
+    train_sampler = build_sampler(cfg, train_ds, world_size=world_size, rank=rank)
 
-    train_sampler = None
-    class_cfg = getattr(cfg.data, "class_packed", None)
-    use_class_packed = bool(getattr(class_cfg, "enabled", False)) if class_cfg else False
-    if use_class_packed:
-        num_classes = int(getattr(class_cfg, "num_classes_per_batch", 0))
-        instances = int(getattr(class_cfg, "instances_per_class", 0))
-        expected_batch = num_classes * instances
-        if expected_batch <= 0:
-            raise ValueError("data.class_packed requires positive classes and instances")
-        if cfg.data.batch_size != expected_batch:
-            raise ValueError(
-                "When data.class_packed.enabled is true, data.batch_size must equal "
-                "num_classes_per_batch * instances_per_class"
-            )
-        base_seed = int(getattr(class_cfg, "seed", 0)) + int(cfg.train.seed)
-        train_sampler = ClassPackedSampler(
-            train_ds,
-            num_classes_per_batch=num_classes,
-            instances_per_class=instances,
-            seed=base_seed,
-            shuffle=cfg.data.shuffle,
-            drop_last=cfg.data.drop_last,
-            num_replicas=world_size if distributed else 1,
-            rank=rank if distributed else 0,
-        )
-    elif distributed:
-        train_sampler = DistSamplerWrapper(
-            train_ds,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=cfg.data.shuffle,
-            seed=cfg.train.seed,
-            drop_last=cfg.data.drop_last,
-        )
-
-    loader_kwargs = {}
-    if cfg.data.num_workers > 0:
-        loader_kwargs["prefetch_factor"] = int(max(1, cfg.data.prefetch_factor))
-        loader_kwargs["worker_init_fn"] = _make_worker_init_fn(cfg.data.worker_threads)
-    if cfg.data.multiprocessing_context:
-        loader_kwargs["multiprocessing_context"] = cfg.data.multiprocessing_context
-    pin_device = cfg.data.pin_memory_device
-    if not torch.cuda.is_available():
-        pin_device = None
-    if cfg.data.pin_memory and pin_device:
-        loader_kwargs["pin_memory_device"] = pin_device
-
-    train_loader = DataLoader(
+    train_loader = build_loader(
+        cfg,
         train_ds,
-        batch_size=cfg.data.batch_size,
-        shuffle=False if train_sampler is not None else cfg.data.shuffle,
         sampler=train_sampler,
-        num_workers=cfg.data.num_workers,
-        pin_memory=cfg.data.pin_memory,
-        persistent_workers=persist_workers,
-        drop_last=cfg.data.drop_last,
         collate_fn=collate_fn,
-        **loader_kwargs,
+        shuffle=cfg.data.shuffle,
+        drop_last=cfg.data.drop_last,
     )
 
     val_loader: Optional[DataLoader] = None
     if val_ds is not None:
-        val_kwargs = dict(loader_kwargs)
-        val_loader = DataLoader(
+        val_loader = build_loader(
+            cfg,
             val_ds,
-            batch_size=cfg.data.batch_size,
-            shuffle=False,
             sampler=None,
-            num_workers=cfg.data.num_workers,
-            pin_memory=cfg.data.pin_memory,
-            persistent_workers=persist_workers,
+            collate_fn=None,
+            shuffle=False,
             drop_last=False,
-            collate_fn=None,  # use default; eval_transform yields single-view tensors
-            **val_kwargs,
         )
 
     return train_loader, val_loader
@@ -946,6 +1003,7 @@ def build_sched(
 
 
 __all__ = [
+    "DATASET_REGISTRY",
     "ENCODER_REGISTRY",
     "HEAD_REGISTRY",
     "METHOD_REGISTRY",
@@ -956,6 +1014,9 @@ __all__ = [
     "build_loss",
     "build_method",
     "build_transforms",
+    "build_dataset",
+    "build_sampler",
+    "build_loader",
     "build_data",
     "build_optimizer",
     "build_sched",
