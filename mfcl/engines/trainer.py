@@ -367,7 +367,21 @@ class Trainer:
             tokens_this_step = 0
             if budget is not None:
                 tokens_this_step = self._count_tokens(batch)
-                if budget.would_exceed(step_samples=tokens_this_step):
+                exceeds_budget = budget.would_exceed(step_samples=tokens_this_step)
+                should_stop = bool(exceeds_budget)
+                if dist.is_available() and dist.is_initialized():
+                    try:
+                        should_stop = self._sync_budget_stop_signal(exceeds_budget)
+                    except Exception:
+                        self._distributed_budget_stop = (
+                            self._distributed_budget_stop or bool(exceeds_budget)
+                        )
+                        should_stop = self._distributed_budget_stop
+                elif exceeds_budget:
+                    self._distributed_budget_stop = True
+                if exceeds_budget or should_stop:
+                    if not (dist.is_available() and dist.is_initialized()):
+                        self._distributed_budget_stop = True
                     break
             if memory_monitor is not None:
                 memory_monitor.update_step_context(
