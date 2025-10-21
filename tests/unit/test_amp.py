@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import torch
 
+import mfcl.utils.amp as amp
 from mfcl.utils.amp import AmpScaler
 
 
@@ -76,3 +77,15 @@ def test_amp_scaler_state_roundtrip_enabled() -> None:
     assert scaler.state_dict() == {"foo": "bar"}
     scaler.load_state_dict({"foo": "baz"})
     assert fake.loaded == {"foo": "baz"}
+
+
+def test_amp_scaler_disables_when_cuda_unavailable(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    amp._WARNED_NO_CUDA = False
+    with caplog.at_level("WARNING"):
+        scaler = AmpScaler(enabled=True)
+    assert not scaler.is_enabled
+    assert any(
+        "AMP requested but CUDA is unavailable" in record.getMessage()
+        for record in caplog.records
+    )
