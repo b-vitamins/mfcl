@@ -152,8 +152,7 @@ def test_class_packed_sampler_distributed_partial_batch():
 
     idx0 = list(iter(rank0))
     idx1 = list(iter(rank1))
-    assert len(idx0) == 8
-    assert len(idx1) == 2
+    assert len(idx0) == len(idx1) == 4
     assert set(idx0).isdisjoint(idx1)
     combined = sorted(idx0 + idx1)
-    assert combined == sorted(full_indices)
+    assert combined == sorted(full_indices[:-2])

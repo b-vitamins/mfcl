@@ -201,12 +201,13 @@ class ClassPackedSampler(Sampler[int]):
         total = len(batches)
         if total == 0:
             return []
-        per_rank = total // self.num_replicas
-        remainder = total % self.num_replicas
-        extra = 1 if self.rank < remainder else 0
-        start = self.rank * per_rank + min(self.rank, remainder)
-        end = start + per_rank + extra
-        return batches[start:end]
+        usable = (total // self.num_replicas) * self.num_replicas
+        if usable == 0:
+            return []
+        per_rank = usable // self.num_replicas
+        start = self.rank * per_rank
+        end = start + per_rank
+        return batches[:usable][start:end]
 
 
 __all__ = ["ClassPackedSampler"]
