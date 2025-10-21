@@ -7,10 +7,15 @@ scaling across CUDA-enabled and CPU-only environments.
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import nullcontext
 from typing import Any, ContextManager, Dict, Optional
 
 import torch
+
+
+_LOGGER = logging.getLogger(__name__)
+_WARNED_NO_CUDA = False
 
 
 class AmpScaler:
@@ -36,8 +41,13 @@ class AmpScaler:
             enabled: If None, enable only when CUDA is available.
             init_scale: Initial scale for GradScaler.
         """
+        global _WARNED_NO_CUDA
+        cuda_available = torch.cuda.is_available()
         if enabled is None:
-            enabled = torch.cuda.is_available()
+            enabled = cuda_available
+            user_requested_amp = False
+        else:
+            user_requested_amp = bool(enabled)
         requested_dtype = amp_dtype or os.environ.get("MFCL_AMP_DTYPE")
         dtype_map = {
             "fp16": torch.float16,
@@ -55,7 +65,17 @@ class AmpScaler:
                 self._cast_dtype = dtype_map[key]
             else:
                 raise ValueError(f"Unsupported AMP dtype: {requested_dtype}")
-        self._enabled = bool(enabled)
+        enabled = bool(enabled)
+        if enabled and not cuda_available:
+            enabled = False
+            if user_requested_amp:
+                if not _WARNED_NO_CUDA:
+                    _LOGGER.warning(
+                        "AMP requested but CUDA is unavailable; disabling AMP."
+                    )
+                    _WARNED_NO_CUDA = True
+
+        self._enabled = enabled
         # Prefer torch.amp API (device-aware); fall back to cuda.amp for older versions
         self._scaler: Any | None = None
         if self._enabled:
