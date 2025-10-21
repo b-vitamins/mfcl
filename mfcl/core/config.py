@@ -171,6 +171,7 @@ class TrainConfig:
     prefetch_depth: int = 1
     loss_fp32: bool = True
     cudnn_bench: bool = True
+    allow_tf32: bool = True
     compile: bool = False
     accum_steps: int = 1
     # Reserved for trainer control; factory is agnostic to step granularity.

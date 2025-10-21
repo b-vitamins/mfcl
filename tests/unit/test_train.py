@@ -79,3 +79,51 @@ def test_hydra_entry_uses_deterministic_benchmark_guard(monkeypatch):
         train._hydra_entry.__wrapped__(cfg)
 
     assert called["args"] == (True, True)
+
+
+_TF32_AVAILABLE = (
+    hasattr(torch.backends, "cuda")
+    and hasattr(torch.backends.cuda, "matmul")
+    and hasattr(torch.backends.cuda.matmul, "allow_tf32")
+    and hasattr(torch.backends, "cudnn")
+    and hasattr(torch.backends.cudnn, "allow_tf32")
+)
+
+
+@pytest.mark.skipif(not _TF32_AVAILABLE, reason="TF32 controls unavailable")
+@pytest.mark.parametrize("allow_tf32", [True, False])
+def test_hydra_entry_respects_tf32_toggle(monkeypatch, allow_tf32):
+    cfg_struct = Config(
+        data=DataConfig(root="/tmp/data", name="imagenet"),
+        aug=AugConfig(local_crops=0),
+        model=ModelConfig(),
+        method=MethodConfig(),
+        optim=OptimConfig(),
+        train=TrainConfig(cudnn_bench=True, save_dir="", allow_tf32=allow_tf32),
+    )
+    cfg = OmegaConf.structured(cfg_struct)
+
+    monkeypatch.setattr(train, "init_distributed", lambda: None)
+    monkeypatch.setattr(train, "get_world_size", lambda: 1)
+    monkeypatch.setattr(train, "get_local_rank", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(train, "_configure_cudnn_benchmark", lambda *_args, **_kwargs: None)
+
+    def _fail_fast(*_args, **_kwargs):
+        raise _StopExecution()
+
+    monkeypatch.setattr(train, "build_data", _fail_fast)
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", lambda *_args, **_kwargs: None, raising=False)
+
+    original_matmul = torch.backends.cuda.matmul.allow_tf32
+    original_cudnn = torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = not allow_tf32
+        torch.backends.cudnn.allow_tf32 = not allow_tf32
+        with pytest.raises(_StopExecution):
+            train._hydra_entry.__wrapped__(cfg)
+        assert torch.backends.cuda.matmul.allow_tf32 is allow_tf32
+        assert torch.backends.cudnn.allow_tf32 is allow_tf32
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_matmul
+        torch.backends.cudnn.allow_tf32 = original_cudnn
