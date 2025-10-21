@@ -260,7 +260,10 @@ def _hydra_entry(cfg: DictConfig) -> None:
         device = torch.device("cpu")
     if hasattr(torch, "set_float32_matmul_precision"):
         try:
-            torch.set_float32_matmul_precision("high")
+            if allow_tf32:
+                torch.set_float32_matmul_precision("high")
+            else:
+                torch.set_float32_matmul_precision("highest")
         except Exception:  # pragma: no cover - defensive
             pass
 
