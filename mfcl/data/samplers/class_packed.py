@@ -122,7 +122,7 @@ class ClassPackedSampler(Sampler[int]):
 
     def __len__(self) -> int:  # type: ignore[override]
         self._ensure_plan()
-        return len(self._local_batches) * self.batch_size
+        return sum(len(batch) for batch in self._local_batches)
 
     def __iter__(self) -> Iterator[int]:  # type: ignore[override]
         self._ensure_plan()
@@ -166,18 +166,21 @@ class ClassPackedSampler(Sampler[int]):
                     continue
                 class_slots.append(bin_list.popleft())
 
-        total_batches = len(class_slots) // self.num_classes_per_batch
-        if total_batches == 0:
-            return []
-        usable = total_batches * self.num_classes_per_batch
-        class_slots = class_slots[:usable]
-
         class_offsets: Dict[int, int] = {cls: 0 for cls in per_class_sequences}
         batches: List[List[int]] = []
-        for batch_idx in range(total_batches):
-            start = batch_idx * self.num_classes_per_batch
-            end = start + self.num_classes_per_batch
-            selected = class_slots[start:end]
+        slot_index = 0
+        max_slots = len(class_slots)
+        if self.drop_last:
+            usable = (max_slots // self.num_classes_per_batch) * self.num_classes_per_batch
+            class_slots = class_slots[:usable]
+            max_slots = len(class_slots)
+        while slot_index < max_slots:
+            remaining = max_slots - slot_index
+            take = min(self.num_classes_per_batch, remaining)
+            if take < self.num_classes_per_batch and self.drop_last:
+                break
+            selected = class_slots[slot_index : slot_index + take]
+            slot_index += take
             batch: List[int] = []
             for cls in selected:
                 seq = per_class_sequences[cls]
@@ -187,20 +190,22 @@ class ClassPackedSampler(Sampler[int]):
                     continue
                 batch.extend(span)
                 class_offsets[cls] = offset + self.instances_per_class
-            if len(batch) == self.batch_size:
+            expected_size = len(selected) * self.instances_per_class
+            if len(batch) == expected_size and (expected_size == self.batch_size or not self.drop_last):
                 batches.append(batch)
         return batches
 
     def _partition_batches(self, batches: List[List[int]]) -> List[List[int]]:
         if self.num_replicas == 1:
             return batches
-        per_rank = len(batches) // self.num_replicas
-        usable = per_rank * self.num_replicas
-        if usable == 0:
+        total = len(batches)
+        if total == 0:
             return []
-        batches = batches[:usable]
-        start = self.rank * per_rank
-        end = start + per_rank
+        per_rank = total // self.num_replicas
+        remainder = total % self.num_replicas
+        extra = 1 if self.rank < remainder else 0
+        start = self.rank * per_rank + min(self.rank, remainder)
+        end = start + per_rank + extra
         return batches[start:end]
 
 
