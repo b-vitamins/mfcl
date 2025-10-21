@@ -2,15 +2,47 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, TypedDict, Sequence, cast
+from typing import Dict, List, Tuple, TypedDict, Sequence, Union, cast
 
 import torch
 
 
+class PairImageBatch(TypedDict):
+    image: torch.Tensor
+    index: torch.Tensor
+
+
+class PairViewBatch(TypedDict):
+    view1: torch.Tensor
+    view2: torch.Tensor
+    index: torch.Tensor
+
+
+PairBatch = Union[PairImageBatch, PairViewBatch]
+
+
 def collate_pair(
     batch: List[Tuple[Dict[str, torch.Tensor], int]],
-) -> Dict[str, torch.Tensor | List[torch.Tensor]]:
-    """Collate a batch of two-view dicts or GPU-ready single images."""
+) -> PairBatch:
+    """Collate a batch of SSL training samples.
+
+    Args:
+        batch: List of tuples ``(payload, index)`` where ``payload`` is either a
+            two-view dictionary with ``{"view1": Tensor[C,H,W], "view2": Tensor[C,H,W]}``
+            or a single-image dictionary ``{"image": Tensor[C,H,W]}``. The index is
+            an integer identifying the sample position within the dataset.
+
+    Returns:
+        A dictionary containing batched tensors and the sample indices.
+
+        * Two-view mode: ``{"view1": Tensor[B,C,H,W], "view2": Tensor[B,C,H,W],
+          "index": LongTensor[B]}``
+        * Single-image mode: ``{"image": Tensor[B,C,H,W], "index": LongTensor[B]}``
+
+    Raises:
+        ValueError: If ``batch`` is empty.
+        KeyError: If the payload does not contain ``view1``/``view2`` or ``image``.
+    """
 
     if not batch:
         raise ValueError("batch must contain at least one element")
@@ -27,7 +59,7 @@ def collate_pair(
     if "image" in sample0:
         images = [sample["image"] for sample, _ in batch]
         return {
-            "image": images,
+            "image": torch.stack(images, dim=0),
             "index": torch.tensor(idxs, dtype=torch.long),
         }
     raise KeyError("Expected keys 'view1'/'view2' or 'image' in samples")
@@ -43,8 +75,35 @@ class MultiCropBatch(TypedDict):
     index: torch.Tensor
 
 
-def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCropBatch:
-    """Collate a batch of multi-crop samples or GPU-ready base images."""
+class MultiCropImageBatch(TypedDict):
+    image: torch.Tensor
+    index: torch.Tensor
+
+
+MultiCropReturn = Union[MultiCropBatch, MultiCropImageBatch]
+
+
+def collate_multicrop(batch: Sequence[Tuple[Dict[str, object], int]]) -> MultiCropReturn:
+    """Collate a batch of multi-crop or single-image samples.
+
+    Args:
+        batch: Sequence of tuples ``(payload, index)``. ``payload`` is either a
+            multi-crop dictionary with ``{"crops": List[Tensor[C,H,W]],
+            "code_crops": Tuple[int, int]}`` or a single-image dictionary with
+            ``{"image": Tensor[C,H,W]}``. The index is an integer identifying the
+            sample position within the dataset.
+
+    Returns:
+        A dictionary containing batched tensors and sample indices.
+
+        * Multi-crop mode: ``{"crops": List[Tensor[B,C,H,W]], "code_crops": Tuple[int, int],
+          "index": LongTensor[B]}``
+        * Single-image mode: ``{"image": Tensor[B,C,H,W], "index": LongTensor[B]}``
+
+    Raises:
+        ValueError: If ``batch`` is empty or crops mismatch across the batch.
+        TypeError: If ``payload['crops']`` is not a list of tensors.
+    """
 
     if not batch:
         raise ValueError("batch must contain at least one element")
@@ -101,10 +160,12 @@ def collate_linear(batch: List[Tuple[torch.Tensor, int]]) -> Dict[str, torch.Ten
     """Collate a batch for linear evaluation.
 
     Args:
-        batch: List of (input_tensor, label) pairs.
+        batch: List of tuples ``(image, label)`` where ``image`` is a tensor with
+            shape ``[C, H, W]`` and ``label`` is the target class index.
 
     Returns:
-        {'input': Tensor[B,3,H,W], 'target': LongTensor[B]}
+        A dictionary ``{"input": Tensor[B,C,H,W], "target": LongTensor[B]}`` where
+        ``B`` is the batch size.
     """
     inputs = [x for x, _ in batch]
     targets = [int(y) for _, y in batch]
