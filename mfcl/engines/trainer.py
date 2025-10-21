@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import nullcontext
@@ -47,6 +48,9 @@ from mfcl.utils.dist import (
 from mfcl.metrics.meter import SmoothedValue
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class _TrainableMethod(Protocol):
     def to(self, device: torch.device) -> "_TrainableMethod": ...
     def train(self, mode: bool = ...) -> "_TrainableMethod": ...
@@ -56,6 +60,26 @@ class _TrainableMethod(Protocol):
     def __call__(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def step(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]: ...
     def on_optimizer_step(self) -> None: ...
+
+
+def _log_exception(
+    source: str,
+    exc: Exception,
+    *,
+    epoch: int | None = None,
+    step: int | None = None,
+) -> None:
+    """Emit a warning with contextual epoch/step information."""
+
+    context = source
+    details: list[str] = []
+    if epoch is not None:
+        details.append(f"epoch={epoch}")
+    if step is not None:
+        details.append(f"step={step}")
+    if details:
+        context = f"{context} ({', '.join(details)})"
+    LOGGER.warning("Exception raised during %s", context, exc_info=exc)
 
 
 class Trainer:
@@ -169,8 +193,11 @@ class Trainer:
         if self.channels_last_inputs:
             try:
                 base_method.to(memory_format=torch.channels_last)
-            except (TypeError, RuntimeError):
-                pass
+            except (TypeError, RuntimeError) as exc:
+                _log_exception(
+                    "method.to(memory_format=torch.channels_last)",
+                    exc,
+                )
         # Global step counts processed micro-batches across the lifetime of the trainer
         self._global_step = 0
         self._last_move_bytes = 0
@@ -212,8 +239,12 @@ class Trainer:
                 fn: Any = getattr(self._method_impl, "on_train_start", None)
                 if callable(fn):
                     fn()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception(
+                    "hook 'method.on_train_start'",
+                    exc,
+                    epoch=start_epoch,
+                )
 
             world_size = get_world_size()
             train_state = {
@@ -315,14 +346,14 @@ class Trainer:
         if sampler is not None and hasattr(sampler, "set_epoch"):
             try:
                 sampler.set_epoch(epoch)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception("sampler.set_epoch", exc, epoch=epoch)
         batch_sampler = getattr(loader, "batch_sampler", None)
         if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
             try:
                 batch_sampler.set_epoch(epoch)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception("batch_sampler.set_epoch", exc, epoch=epoch)
 
         iterator = iter(loader)
         step = 0
@@ -422,8 +453,13 @@ class Trainer:
                             if pi.ndim == 1 and mu.ndim == 2 and mu.shape[0] == pi.shape[0]:
                                 global_mu = (pi.unsqueeze(1) * mu).sum(dim=0)
                                 third_sketch.set_mean(global_mu.cpu())
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "third_moment.set_mean",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step + 1,
+                        )
             if third_sketch is not None:
                 _set_active_sketch(third_sketch)
             if comms_logger is not None:
@@ -448,38 +484,63 @@ class Trainer:
                                 epoch=epoch,
                                 global_step=self._global_step + 1,
                             )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            _log_exception(
+                                "topr_monitor.update",
+                                exc,
+                                epoch=epoch,
+                                step=self._global_step + 1,
+                            )
             finally:
                 if hardness_monitor is not None:
                     hardness_monitor.end_step()
                 if mix_estimator is not None:
                     try:
                         mix_estimator.log_step(step=self._global_step + 1, epoch=epoch)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "mixture_estimator.log_step",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step + 1,
+                        )
                 if third_sketch is not None:
                     try:
                         third_sketch.log_step(
                             step=self._global_step + 1, epoch=epoch
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "third_moment.log_step",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step + 1,
+                        )
                 if self.topr_monitor is not None:
                     try:
                         self.topr_monitor.log_step(
                             step=self._global_step + 1, epoch=epoch
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "topr_monitor.log_step",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step + 1,
+                        )
                 if self.beta_controller is not None:
                     try:
                         self._maybe_update_beta_controller(
                             epoch=epoch,
                             global_step=self._global_step + 1,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "beta_controller.update",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step + 1,
+                        )
                 _set_active_estimator(None)
                 if third_sketch is not None:
                     _set_active_sketch(None)
@@ -548,8 +609,13 @@ class Trainer:
                             batch=batch,
                             model=self.method,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_exception(
+                            "fidelity_probe.maybe_log",
+                            exc,
+                            epoch=epoch,
+                            step=self._global_step,
+                        )
 
                 if memory_monitor is not None:
                     memory_monitor.record_step_snapshot(
@@ -693,8 +759,12 @@ class Trainer:
                 dist.all_reduce(time_tensor, op=dist.ReduceOp.MAX)
                 global_samples = float(samples_tensor.item())
                 global_epoch_time = float(time_tensor.item())
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception(
+                    "distributed epoch metrics reduction",
+                    exc,
+                    epoch=epoch,
+                )
 
         if energy_monitor is not None:
             epoch_energy_per_image_j = (
@@ -763,20 +833,41 @@ class Trainer:
             return float(controller.beta_max)
         return float(base)
 
-    def _apply_beta_to_method(self, beta_value: float) -> None:
+    def _apply_beta_to_method(
+        self,
+        beta_value: float,
+        *,
+        epoch: int | None = None,
+        step: int | None = None,
+    ) -> None:
         method_impl = self._method_impl
         if hasattr(method_impl, "set_mixture_beta"):
             try:
                 method_impl.set_mixture_beta(float(beta_value))
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception(
+                    "method.set_mixture_beta",
+                    exc,
+                    epoch=epoch,
+                    step=step,
+                )
         try:
             setattr(method_impl, "mixture_beta", float(beta_value))
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_exception(
+                "method.setattr(mixture_beta)",
+                exc,
+                epoch=epoch,
+                step=step,
+            )
 
-    def _current_beta_value(self) -> float:
+    def _current_beta_value(
+        self,
+        *,
+        epoch: int | None = None,
+        step: int | None = None,
+    ) -> float:
         method_impl = self._method_impl
         for attr in ("mixture_beta", "beta", "mixture_beta_raw"):
             if hasattr(method_impl, attr):
@@ -789,8 +880,13 @@ class Trainer:
         if controller is not None and controller.last_beta is not None:
             try:
                 return float(controller.last_beta)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                _log_exception(
+                    "beta_controller.last_beta",
+                    exc,
+                    epoch=epoch,
+                    step=step,
+                )
         return 0.0
 
     def _maybe_update_topr(self, *, epoch: int, global_step: int) -> None:
@@ -808,7 +904,7 @@ class Trainer:
             return
         responsibilities = stats.get("R")
         Q = stats.get("Q") if isinstance(stats.get("Q"), torch.Tensor) else None
-        beta_value = self._current_beta_value()
+        beta_value = self._current_beta_value(epoch=epoch, step=global_step)
         timer = self.step_timer
         ctx = timer.range_topr() if timer is not None else nullcontext()
         with ctx:
@@ -850,11 +946,20 @@ class Trainer:
                 controller._last_beta = beta_value  # type: ignore[attr-defined]
                 if controller._last_info:  # type: ignore[attr-defined]
                     controller._last_info["beta_applied"] = beta_value  # type: ignore[index]
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception(
+                    "beta_controller.broadcast",
+                    exc,
+                    epoch=epoch,
+                    step=global_step,
+                )
         info["beta_raw"] = beta_raw
         controller.log_step(step=global_step, epoch=epoch, info=info)
-        self._apply_beta_to_method(beta_value)
+        self._apply_beta_to_method(
+            beta_value,
+            epoch=epoch,
+            step=global_step,
+        )
 
     def _apply_optimizer_step(
         self,
@@ -913,8 +1018,13 @@ class Trainer:
         if hasattr(method_impl, "on_optimizer_step"):
             try:
                 method_impl.on_optimizer_step()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_exception(
+                    "hook 'method.on_optimizer_step'",
+                    exc,
+                    epoch=epoch,
+                    step=global_step,
+                )
         if self.scheduler and self.scheduler_step_on == "batch":
             # Only step LR scheduler when the optimizer performed an update.
             did_step = True
