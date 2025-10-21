@@ -8,6 +8,7 @@ registered via explicit calls and constructed deterministically.
 
 from __future__ import annotations
 
+import inspect
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import warnings
@@ -219,6 +220,41 @@ def _check_encoder_output_dim(
         encoder.train(encoder_was_training)
 
 
+def _get_supported_kwargs(
+    ctor: Callable[..., Any]
+) -> tuple[Optional[set[str]], bool]:
+    """Return supported keyword names for ``ctor`` and whether ``**kwargs`` is allowed."""
+
+    try:
+        signature = inspect.signature(ctor)
+    except (TypeError, ValueError):  # pragma: no cover - hard to hit with pure Python callables
+        return None, True
+
+    supported: set[str] = set()
+    accepts_var_kwargs = False
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_var_kwargs = True
+        elif param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            supported.add(param.name)
+    return supported, accepts_var_kwargs
+
+
+def _kwarg_supported(
+    supported: Optional[set[str]],
+    accepts_var_kwargs: bool,
+    name: str,
+) -> bool:
+    """Return True if ``name`` is an accepted keyword for the ctor signature."""
+
+    if accepts_var_kwargs or supported is None:
+        return True
+    return name in supported
+
+
 def build_encoder(cfg: Config) -> nn.Module:
     """Instantiate encoder backbone from ``cfg.model.encoder``.
 
@@ -236,20 +272,45 @@ def build_encoder(cfg: Config) -> nn.Module:
     model_name = None
     if isinstance(enc_key, str) and enc_key.startswith("timm:"):
         model_name = enc_key.split(":", 1)[1]
+        if not model_name:
+            raise ValueError(
+                "Encoder 'timm' requires a model name formatted as 'timm:<model_name>'."
+            )
         enc_key = "timm"
     enc_ctor = ENCODER_REGISTRY.get(enc_key)
-    # Try to pass norm_feat and model_name when supported; fall back to default ctor.
+    if enc_key == "timm" and not model_name:
+        raise ValueError(
+            "Encoder 'timm' requires a model name formatted as 'timm:<model_name>'."
+        )
+
+    supported, accepts_var_kwargs = _get_supported_kwargs(enc_ctor)
+    encoder_kwargs: Dict[str, Any] = {}
+
+    def _require_kwarg(name: str, value: Any) -> None:
+        if not _kwarg_supported(supported, accepts_var_kwargs, name):
+            raise TypeError(
+                f"Encoder '{enc_key}' does not accept required keyword argument '{name}'."
+            )
+        encoder_kwargs[name] = value
+
+    def _optional_kwarg(name: str, value: Any) -> None:
+        if _kwarg_supported(supported, accepts_var_kwargs, name):
+            encoder_kwargs[name] = value
+
+    if enc_key == "timm":
+        _require_kwarg("model_name", model_name)
+        _optional_kwarg("pretrained", False)
+        _optional_kwarg("norm_feat", getattr(cfg.model, "norm_feat", True))
+    else:
+        _optional_kwarg("norm_feat", getattr(cfg.model, "norm_feat", True))
+
     try:
-        if enc_key == "timm":
-            encoder = enc_ctor(
-                model_name=model_name,
-                pretrained=False,
-                norm_feat=getattr(cfg.model, "norm_feat", True),
-            )  # type: ignore[misc]
-        else:
-            encoder = enc_ctor(norm_feat=getattr(cfg.model, "norm_feat", True))  # type: ignore[misc]
-    except TypeError:
-        encoder = enc_ctor()  # type: ignore[misc]
+        encoder = enc_ctor(**encoder_kwargs)  # type: ignore[misc]
+    except TypeError as err:
+        passed = ", ".join(sorted(encoder_kwargs)) or "<none>"
+        raise TypeError(
+            f"Encoder '{enc_key}' constructor rejected keyword arguments {{{passed}}}: {err}"
+        ) from err
     _check_encoder_output_dim(encoder, cfg.model.encoder_dim, cfg.aug.img_size)
     return encoder
 
