@@ -1,4 +1,10 @@
-"""Utilities for overlapping host-to-device transfers with compute."""
+"""Utilities for overlapping host-to-device transfers with compute.
+
+The module exposes :class:`PrefetchLoader`, a thin wrapper around iterable
+data loaders that moves batches to CUDA devices on dedicated streams. It also
+contains helper utilities used to recursively place arbitrary nested
+structures on a device.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +21,20 @@ def _move_to_device(
     *,
     channels_last: bool,
 ) -> Any:
+    """Move ``obj`` to ``device`` while preserving container structure.
+
+    Args:
+        obj: Object, potentially nested, containing tensors to be moved.
+        device: Destination CUDA device.
+        channels_last: Whether 4D floating tensors should be converted to
+            channels-last layout after transfer.
+
+    Returns:
+        The input ``obj`` with every contained tensor moved to ``device``.
+
+    Raises:
+        RuntimeError: Propagated if moving tensors to the device fails.
+    """
     if torch.is_tensor(obj):
         tensor = obj.to(device=device, non_blocking=True)
         if (
@@ -43,7 +63,22 @@ def _move_to_device(
 
 
 class PrefetchLoader(Iterable[Any]):
-    """Wrap a DataLoader to prefetch batches onto a CUDA device."""
+    """Wrap an iterable and prefetch batches onto a CUDA device.
+
+    Args:
+        loader: Source iterable that yields CPU batches.
+        device: CUDA device batches should be moved onto.
+        channels_last: Whether transferred 4D floating tensors should be
+            converted to channels-last memory format.
+        prefetch_depth: Number of CUDA streams used for overlapping data
+            transfers with compute.
+
+    Returns:
+        ``None``.
+
+    Raises:
+        RuntimeError: If CUDA is unavailable when instantiated.
+    """
 
     def __init__(
         self,
@@ -64,10 +99,46 @@ class PrefetchLoader(Iterable[Any]):
         self._queue: deque[tuple[torch.cuda.Stream, Any]] = deque()
         self._next_stream_idx = 0
 
+    def __enter__(self) -> "PrefetchLoader":
+        """Return ``self`` so instances can be used as context managers.
+
+        Returns:
+            ``self``.
+        """
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
+        """Synchronize streams and release queued batches on exit.
+
+        Args:
+            exc_type: Exception type, if any.
+            exc: Exception instance, if any.
+            tb: Traceback object, if any.
+
+        Returns:
+            ``None``.
+        """
+
+        self.close()
+
     def __len__(self) -> int:
+        """Return the length of the underlying loader.
+
+        Returns:
+            Number of batches the wrapped ``loader`` contains.
+        """
+
         return len(self.loader)  # type: ignore[arg-type]
 
     def __iter__(self) -> "PrefetchLoader":
+        """Initialise CUDA streams and begin prefetching.
+
+        Returns:
+            ``self`` so the loader can be iterated multiple times.
+        """
+
+        self.close()
         self._iterator = iter(self.loader)
         self._streams = [
             torch.cuda.Stream(device=self.device) for _ in range(self.prefetch_depth)
@@ -80,19 +151,57 @@ class PrefetchLoader(Iterable[Any]):
         return self
 
     def __next__(self) -> Any:
+        """Return the next prefetched batch.
+
+        Returns:
+            Batch yielded by the wrapped loader, moved to ``device``.
+
+        Raises:
+            RuntimeError: If ``__iter__`` has not been called.
+            StopIteration: When the wrapped loader is exhausted.
+        """
+
         if not self._queue:
             if self._iterator is None:
                 if not self._streams:
                     raise RuntimeError("PrefetchLoader was not iterated")
+                self.close()
                 raise StopIteration
             if not self._preload():
+                self.close()
                 raise StopIteration
         stream, batch = self._queue.popleft()
         torch.cuda.current_stream(self.device).wait_stream(stream)  # type: ignore[arg-type]
-        self._preload()
+        has_next = self._preload()
+        if not has_next and not self._queue:
+            self.close()
         return batch
 
+    def close(self) -> None:
+        """Synchronize streams and release references to prefetched batches.
+
+        Returns:
+            ``None``.
+        """
+
+        while self._queue:
+            stream, _ = self._queue.popleft()
+            stream.synchronize()
+        self._queue.clear()
+        for stream in self._streams:
+            stream.synchronize()
+        self._streams.clear()
+        self._iterator = None
+        self._next_stream_idx = 0
+
     def _preload(self) -> bool:
+        """Fetch the next batch and enqueue it for future consumption.
+
+        Returns:
+            ``True`` if a batch was queued, ``False`` when the loader is
+            exhausted.
+        """
+
         if self._iterator is None:
             return False
         try:
