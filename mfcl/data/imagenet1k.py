@@ -33,9 +33,11 @@ class ImageListDataset(Dataset):
         super().__init__()
         self.root = root
         self.transform = transform
-        if not os.path.exists(file_list):
-            raise FileNotFoundError(file_list)
-        with open(file_list, "r") as f:
+        list_path = file_list if os.path.isabs(file_list) else os.path.join(root, file_list)
+        list_path = os.path.abspath(list_path)
+        if not os.path.exists(list_path):
+            raise FileNotFoundError(list_path)
+        with open(list_path, "r", encoding="utf-8") as f:
             lines = [ln.strip() for ln in f.readlines() if ln.strip()]
         self.paths: List[str] = []
         for p in lines:
@@ -58,10 +60,12 @@ class ImageListDataset(Dataset):
         path = self.paths[idx]
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image not found at index {idx}: {path}")
-        img = Image.open(path).convert("RGB")
+        with Image.open(path) as img:
+            img_converted = img.convert("RGB")
+            img_copy = img_converted.copy()
         if self.transform is None:
-            return {"img": img}, idx
-        out = self.transform(img)
+            return {"img": img_copy}, idx
+        out = self.transform(img_copy)
         if isinstance(out, dict):
             return out, idx
         return {"input": out}, idx
