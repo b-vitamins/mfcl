@@ -124,12 +124,17 @@ def make_simclr_gpu_augment(
 ) -> Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]:
     """Build a batch-level augmentor that maps 'image' -> ('view1','view2')."""
 
+    pipeline = _simclr_pipeline(cfg, cfg.img_size)
+
+    def _apply_simclr(batch: torch.Tensor | Sequence[torch.Tensor]) -> torch.Tensor:
+        return _apply_pipeline(batch, pipeline)
+
     def _augment(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         base = batch.pop("image", None)
         if base is None:
             return batch
-        view1 = _apply_pipeline(base, _simclr_pipeline(cfg, cfg.img_size))
-        view2 = _apply_pipeline(base, _simclr_pipeline(cfg, cfg.img_size))
+        view1 = _apply_simclr(base)
+        view2 = _apply_simclr(base)
         batch["view1"] = _maybe_channels_last(view1, channels_last)
         batch["view2"] = _maybe_channels_last(view2, channels_last)
         return batch
@@ -183,20 +188,35 @@ def make_swav_gpu_augment(
     global_scale = (0.14, 1.0)
     local_scale = (0.05, 0.14)
 
+    global_pipeline = _swav_pipeline(cfg, cfg.img_size, global_scale)
+
+    def _apply_global(batch: torch.Tensor | Sequence[torch.Tensor]) -> torch.Tensor:
+        return _apply_pipeline(batch, global_pipeline)
+
+    local_pipeline: v2.Transform | None = None
+    if int(cfg.local_crops) > 0:
+        local_pipeline = _swav_pipeline(cfg, cfg.local_size, local_scale)
+
+        def _apply_local(batch: torch.Tensor | Sequence[torch.Tensor]) -> torch.Tensor:
+            if local_pipeline is None:  # pragma: no cover - defensive
+                raise RuntimeError("Local pipeline is not initialized")
+            return _apply_pipeline(batch, local_pipeline)
+    else:
+        _apply_local = None
+
     def _augment(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         base = batch.pop("image", None)
         if base is None:
             return batch
         crops: List[torch.Tensor] = []
         for _ in range(int(cfg.global_crops)):
-            crop = _apply_pipeline(base, _swav_pipeline(cfg, cfg.img_size, global_scale))
+            crop = _apply_global(base)
             crops.append(_maybe_channels_last(crop, channels_last))
         if int(cfg.local_crops) > 0:
             for _ in range(int(cfg.local_crops)):
-                crop = _apply_pipeline(
-                    base,
-                    _swav_pipeline(cfg, cfg.local_size, local_scale),
-                )
+                if _apply_local is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Local pipeline callable is not available")
+                crop = _apply_local(base)
                 crops.append(_maybe_channels_last(crop, channels_last))
         batch["crops"] = crops
         batch["code_crops"] = (0, 1)
