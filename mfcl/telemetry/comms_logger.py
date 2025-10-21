@@ -8,14 +8,35 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO, Optional, Any
 
 import torch
 import torch.distributed as dist
 
 
 class PayloadCategory(Enum):
-    """Semantic tags for collective payloads."""
+    """Semantic tags for collective payloads.
+
+    The communication logger uses these categories to attribute the number of
+    bytes transferred by a collective to higher-level algorithmic concepts.
+    Consumers of the telemetry file may rely on the following conventions:
+
+    Attributes:
+        FEATURES_ALLGATHER: Feature tensors gathered across all ranks prior to
+            model evaluation or scoring.
+        MOMENTS_MU: First-moment (mean) statistics shared between ranks.
+        MOMENTS_SIGMA_FULL: Full covariance matrices communicated when fitting
+            multivariate models.
+        MOMENTS_SIGMA_DIAG: Diagonal covariance statistics broadcast or
+            reduced across ranks.
+        MIXTURE_MU_K: Mean parameters for mixture model components.
+        MIXTURE_SIGMA_K: Covariance parameters for mixture model components.
+        THIRD_MOMENT_SKETCH: Sketches of higher-order moment tensors used for
+            moment-matching algorithms.
+        TOPR_INDICES: Indices exchanged for top-*r* selection routines.
+        OTHER: Any payload that does not fall into one of the specialised
+            categories above.
+    """
 
     FEATURES_ALLGATHER = auto()
     MOMENTS_MU = auto()
@@ -242,13 +263,120 @@ def close_comms_logger() -> None:
         _ACTIVE_LOGGER = None
 
 
+class AsyncCollectiveHandle:
+    """Wrap an asynchronous work handle to emit telemetry.
+
+    The wrapper intercepts lifecycle calls such as :meth:`wait` and
+    :meth:`is_completed` to ensure that the communication logger records the
+    duration of an asynchronous collective exactly once.
+
+    Args:
+        kind: Name of the collective (for example ``"all_reduce"``).
+        tensor: Representative payload tensor whose size determines the number
+            of bytes transferred on the wire.
+        category: Semantic category assigned to the payload.
+        work: Underlying asynchronous work handle returned by
+            :mod:`torch.distributed` or a compatible stub used for testing.
+        logger: Active communication logger.
+        start_time_s: Wall-clock timestamp captured immediately before the
+            collective was issued.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        tensor: torch.Tensor,
+        category: PayloadCategory,
+        work: Any,
+        logger: "CommsLogger",
+        start_time_s: float | None = None,
+    ) -> None:
+        self._kind = kind
+        self._tensor = tensor
+        self._category = category
+        self._work = work
+        self._logger = logger
+        self._start_time_s = start_time_s if start_time_s is not None else time.perf_counter()
+        self._logged = False
+
+    def wait(self, *args, **kwargs):  # type: ignore[override]
+        """Block until the work completes and record the telemetry event."""
+
+        try:
+            return self._work.wait(*args, **kwargs)
+        finally:
+            self._finalize()
+
+    def is_completed(self) -> bool:  # type: ignore[override]
+        """Return whether the work has finished and log the event if so."""
+
+        completed = self._work.is_completed()
+        if completed:
+            self._finalize()
+        return completed
+
+    def synchronize(self):  # type: ignore[override]
+        """Synchronise with the completion of the work and log the event."""
+
+        if hasattr(self._work, "synchronize"):
+            try:
+                return self._work.synchronize()
+            finally:
+                self._finalize()
+        return self.wait()
+
+    def result(self):  # type: ignore[override]
+        """Proxy to :meth:`torch.distributed.Work.result` with logging."""
+
+        if hasattr(self._work, "result"):
+            try:
+                return self._work.result()
+            finally:
+                self._finalize()
+        return self.wait()
+
+    def exception(self):  # type: ignore[override]
+        """Return the underlying exception, logging the event beforehand."""
+
+        self._finalize()
+        if hasattr(self._work, "exception"):
+            return self._work.exception()
+        return None
+
+    def _finalize(self) -> None:
+        if self._logged:
+            return
+        duration = time.perf_counter() - self._start_time_s
+        self._logger.record_event(
+            kind=self._kind, tensor=self._tensor, category=self._category, duration_s=duration
+        )
+        self._logged = True
+
+    def __getattr__(self, name: str):
+        return getattr(self._work, name)
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        try:
+            if hasattr(self._work, "is_completed") and self._work.is_completed():
+                self._finalize()
+        except Exception:
+            pass
+
+
+def is_logging_enabled() -> bool:
+    """Return ``True`` when collective telemetry should be recorded."""
+
+    logger = get_comms_logger()
+    if logger is None:
+        return False
+    return _safe_world_size() > 1
+
+
 @contextmanager
 def log_collective(kind: str, tensor: torch.Tensor, category: PayloadCategory):
     logger = get_comms_logger()
-    if logger is None:
-        yield
-        return
-    if _safe_world_size() <= 1:
+    if logger is None or not is_logging_enabled():
         yield
         return
     start = time.perf_counter()
@@ -283,8 +411,10 @@ def _estimate_wire_bytes(kind: str, size_bytes: float, world_size: int) -> float
 __all__ = [
     "PayloadCategory",
     "CommsLogger",
+    "AsyncCollectiveHandle",
     "configure_comms_logger",
     "get_comms_logger",
     "close_comms_logger",
+    "is_logging_enabled",
     "log_collective",
 ]
