@@ -142,6 +142,42 @@ def _resolve_param(key: str, value: Any) -> tuple[str | None, str | None, Any]:
     return key, alias, value
 
 
+def _coerce_nnodes(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        if value < 1:
+            raise ValueError("nnodes must be a positive integer")
+        return str(value)
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+    return value_str
+
+
+def _coerce_node_rank(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        node_rank = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("node_rank must be an integer") from exc
+    if node_rank < 0:
+        raise ValueError("node_rank must be non-negative")
+    return node_rank
+
+
+def _normalize_rendezvous(cfg: Any) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not cfg:
+        return data
+    for key, value in _as_dict(cfg).items():
+        if value is None:
+            continue
+        data[str(key)] = str(value)
+    return data
+
+
 @dataclass
 class RunSpec:
     identifier: str
@@ -151,6 +187,9 @@ class RunSpec:
     params: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
+    nnodes: str | None = None
+    node_rank: int | None = None
+    rendezvous: dict[str, str] = field(default_factory=dict)
     status: str = "pending"
     returncode: int | None = None
     command: list[str] = field(default_factory=list)
@@ -170,6 +209,10 @@ def _build_run_specs(
     if not isinstance(grid_entries, list) or not grid_entries:
         raise ValueError("Grid configuration must include a non-empty 'grid' list")
 
+    default_nnodes = _coerce_nnodes(grid_cfg.get("nnodes"))
+    default_node_rank = _coerce_node_rank(grid_cfg.get("node_rank"))
+    default_rendezvous = _normalize_rendezvous(grid_cfg.get("rendezvous"))
+
     runs: list[RunSpec] = []
     counter = 0
     for entry_index, raw_entry in enumerate(grid_entries):
@@ -188,6 +231,12 @@ def _build_run_specs(
         entry_overrides.extend(budget_overrides)
         entry_metadata = _as_dict(entry.get("metadata"))
         entry_metadata.update(budget_meta)
+
+        entry_nnodes = _coerce_nnodes(entry.get("nnodes") if "nnodes" in entry else default_nnodes)
+        entry_node_rank = _coerce_node_rank(entry.get("node_rank") if "node_rank" in entry else default_node_rank)
+        rendezvous_cfg = dict(default_rendezvous)
+        if "rendezvous" in entry:
+            rendezvous_cfg.update(_normalize_rendezvous(entry.get("rendezvous")))
 
         for combo_index, combo in enumerate(combos):
             counter += 1
@@ -237,6 +286,9 @@ def _build_run_specs(
                 params=combo_params,
                 metadata=dict(entry_metadata),
                 env={**entry_env, **combo_env},
+                nnodes=entry_nnodes,
+                node_rank=entry_node_rank,
+                rendezvous=rendezvous_cfg,
             )
             runs.append(spec)
     return runs, {str(k): str(v) for k, v in base_env.items()}
@@ -259,7 +311,29 @@ def _launch_run(
 ) -> None:
     spec.run_dir.mkdir(parents=True, exist_ok=True)
     command = list(base_cmd)
-    command.extend([f"--nproc_per_node={spec.world_size}"])
+    nnodes_flag_added = False
+    if spec.nnodes:
+        command.append(f"--nnodes={spec.nnodes}")
+        nnodes_flag_added = True
+    if spec.node_rank is not None:
+        command.append(f"--node_rank={spec.node_rank}")
+
+    rendezvous_flags = {
+        "backend": "rdzv_backend",
+        "endpoint": "rdzv_endpoint",
+        "id": "rdzv_id",
+        "conf": "rdzv_conf",
+    }
+    rendezvous_present = bool(spec.rendezvous)
+    for key, flag in rendezvous_flags.items():
+        value = spec.rendezvous.get(key)
+        if value:
+            command.append(f"--{flag}={value}")
+
+    if not rendezvous_present and not nnodes_flag_added and spec.node_rank is None:
+        command.append("--standalone")
+
+    command.append(f"--nproc_per_node={spec.world_size}")
     command.append(entrypoint)
     command.extend(spec.overrides)
     spec.command = command
@@ -273,7 +347,18 @@ def _launch_run(
         with socket.socket() as sock:
             sock.bind(("", 0))
             child_env["MASTER_PORT"] = str(sock.getsockname()[1])
-    child_env["WORLD_SIZE"] = str(spec.world_size)
+    try:
+        nnodes_int = int(spec.nnodes) if spec.nnodes is not None else None
+    except ValueError:
+        nnodes_int = None
+    total_world_size = spec.world_size * nnodes_int if nnodes_int else spec.world_size
+    child_env["WORLD_SIZE"] = str(total_world_size)
+    child_env["LOCAL_WORLD_SIZE"] = str(spec.world_size)
+    child_env["NPROC_PER_NODE"] = str(spec.world_size)
+    if spec.nnodes:
+        child_env["NNODES"] = str(spec.nnodes)
+    if spec.node_rank is not None:
+        child_env["NODE_RANK"] = str(spec.node_rank)
     child_env["MFCL_SWEEP_RUN_ID"] = spec.identifier
     child_env["MFCL_SWEEP_RUN_DIR"] = str(spec.run_dir)
     child_env["MFCL_SWEEP_PARAMS"] = json.dumps(spec.params)
@@ -337,6 +422,9 @@ def _build_manifest_payload(
                 "params": dict(spec.params),
                 "metadata": dict(spec.metadata),
                 "env": dict(spec.env),
+                "nnodes": spec.nnodes,
+                "node_rank": spec.node_rank,
+                "rendezvous": dict(spec.rendezvous),
                 "status": spec.status,
                 "returncode": spec.returncode,
                 "command": list(spec.command),
@@ -397,7 +485,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
         base_env=base_env,
     )
 
-    base_cmd = ["torchrun", "--standalone"]
+    base_cmd = ["torchrun"]
     entrypoint = str(grid_cfg.get("entrypoint") or "train.py")
     working_dir = Path(grid_cfg.get("work_dir") or _project_root())
 

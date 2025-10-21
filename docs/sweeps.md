@@ -32,6 +32,12 @@ Key points:
   `MFCL_SWEEP_*` variables for custom hooks. When `MASTER_PORT` is not provided
   the runner auto-selects a free local port to avoid collisions across
   back-to-back launches.
+- Multi-node launches can be configured by specifying `nnodes`, `node_rank`,
+  and an optional `rendezvous` block (`backend`, `endpoint`, `id`, `conf`) at
+  the grid root or per-entry level. These values drive the generated
+  `torchrun` flags (`--nnodes`, `--rdzv_backend`, `--rdzv_endpoint`, etc.) and
+  populate `WORLD_SIZE`, `LOCAL_WORLD_SIZE`, `NNODES`, and `NODE_RANK` in the
+  child environment.
 - The sweep manifest (`sweep_manifest.json`) captures the full configuration,
   overrides, environment, and completion status of every run.
 
@@ -64,5 +70,6 @@ Reports are written to `<root>/reports/summary_<timestamp>.csv` and
 ## Testing
 
 `pytest tests/test_sweep.py` exercises the end-to-end harness using a dry-run
-stub that writes deterministic telemetry files. The test validates parameter
-expansion, manifest bookkeeping, and Markdown column coverage.
+stub that writes deterministic telemetry files. Complementary coverage in
+`tests/integration/test_sweep.py` ensures multi-node grid options are parsed
+into the expected launcher arguments and environment variables.
