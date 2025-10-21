@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from collections import deque
+from typing import Any, Deque, Dict, List
 
 import torch
 import torch.nn as nn
@@ -62,7 +63,7 @@ class SwAV(BaseMethod):
         )
         self.normalize_input = normalize_input
         self.codes_queue_size = max(int(codes_queue_size), 0)
-        self._codes_queue: Dict[int, List[torch.Tensor]] = {}
+        self._codes_queue: Dict[int, Deque[torch.Tensor]] = {}
         self._codes_queue_rows: Dict[int, int] = {}
 
     def forward_views(self, batch: Dict[str, Any]):
@@ -95,7 +96,7 @@ class SwAV(BaseMethod):
         for idx in code_idx:
             stored = self._codes_queue.get(int(idx))
             if stored:
-                tensor = torch.cat(stored, dim=0)
+                tensor = torch.cat(list(stored), dim=0)
                 gathered[int(idx)] = tensor.to(
                     device=logits[int(idx)].device, dtype=logits[int(idx)].dtype
                 )
@@ -107,13 +108,16 @@ class SwAV(BaseMethod):
         for idx in code_idx:
             key = int(idx)
             entry = logits[key].detach().to(torch.float32).cpu()
-            queue = self._codes_queue.setdefault(key, [])
-            queue.append(entry)
-            rows = self._codes_queue_rows.get(key, 0) + entry.shape[0]
-            while rows > self.codes_queue_size and queue:
-                removed = queue.pop(0)
-                rows -= removed.shape[0]
-            self._codes_queue_rows[key] = rows
+            queue = self._codes_queue.get(key)
+            if queue is None:
+                queue = deque(maxlen=self.codes_queue_size)
+                self._codes_queue[key] = queue
+            if entry.shape[0] == 0:
+                self._codes_queue_rows[key] = len(queue)
+                continue
+            for row in entry.split(1, dim=0):
+                queue.append(row)
+            self._codes_queue_rows[key] = len(queue)
 
 
 __all__ = ["SwAV"]
