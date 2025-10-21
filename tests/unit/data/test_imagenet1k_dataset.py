@@ -15,10 +15,10 @@ def test_imagelist_resolves_paths(tmp_path: Path):
     lst = tmp_path / "train_list.txt"
     rels = sorted([p.relative_to(tmp_path) for p in train.rglob("*.png")])
     lst.write_text("\n".join(str(p) for p in rels))
-    ds = ImageListDataset(str(tmp_path), str(lst))
+    ds = ImageListDataset(str(tmp_path), "train_list.txt")
     assert len(ds) == len(rels)
     sample, idx = ds[0]
-    assert isinstance(sample, (dict, object))
+    assert "img" in sample
 
 
 def test_imagelist_missing_file_message(tmp_path: Path):
@@ -29,6 +29,51 @@ def test_imagelist_missing_file_message(tmp_path: Path):
         ds[0]
     assert "index 0" in str(exc.value)
     assert "missing.png" in str(exc.value)
+
+
+def test_imagelist_repeated_sampling_closes_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    train, _ = make_synthetic_imagefolder(tmp_path)
+    lst = tmp_path / "train_list.txt"
+    rels = sorted([p.relative_to(tmp_path) for p in train.rglob("*.png")])
+    lst.write_text("\n".join(str(p) for p in rels))
+
+    opened = []
+
+    class DummyImage:
+        def __init__(self, path: str):
+            self.path = path
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.closed = True
+            return False
+
+        def convert(self, mode: str):
+            self.mode = mode
+            return self
+
+        def copy(self):
+            return {"path": self.path, "mode": getattr(self, "mode", None)}
+
+    def fake_open(path: str):
+        img = DummyImage(path)
+        opened.append(img)
+        return img
+
+    monkeypatch.setattr("mfcl.data.imagenet1k.Image.open", fake_open)
+
+    ds = ImageListDataset(str(tmp_path), "train_list.txt")
+    expected_path = str(tmp_path / rels[0])
+
+    for _ in range(5):
+        sample, _ = ds[0]
+        assert sample["img"]["path"] == expected_path
+
+    assert len(opened) == 5
+    assert all(img.closed for img in opened)
 
 
 def test_build_imagenet_datasets_imagefolder(tmp_path: Path):
