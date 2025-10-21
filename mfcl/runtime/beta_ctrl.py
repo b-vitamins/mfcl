@@ -85,6 +85,17 @@ class BetaController:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def apply_broadcast(self, beta_value: float, info: Dict[str, float | str]) -> None:
+        """Apply a beta value received from a distributed broadcast."""
+
+        beta_float = _to_float(beta_value)
+        if beta_float is None or not math.isfinite(beta_float):
+            raise ValueError("beta_value must be a finite scalar")
+        payload = dict(info)
+        payload.setdefault("beta_applied", float(beta_float))
+        self._last_beta = float(beta_float)
+        self._last_info = payload
+
     def step(
         self,
         B_hat_stats: Dict[str, Any] | None,

@@ -64,3 +64,23 @@ def test_beta_controller_smooths_increases() -> None:
     candidate = float(info2["beta_candidate"])
     assert second_beta > first_beta
     assert second_beta < candidate
+
+
+def test_apply_broadcast_updates_state() -> None:
+    controller = BetaController(
+        target_eps=0.05,
+        beta_min=0.1,
+        beta_max=12.0,
+        ema_window=5,
+    )
+
+    info = {"beta_clipped": 0.75, "reason": "broadcasted"}
+    controller.apply_broadcast(0.75, info)
+
+    last_info = controller.last_info
+    assert controller.last_beta is not None
+    assert math.isclose(controller.last_beta, 0.75)
+    assert last_info["beta_clipped"] == 0.75
+    assert last_info["reason"] == "broadcasted"
+    assert last_info["beta_applied"] == 0.75
+    assert "beta_applied" not in info

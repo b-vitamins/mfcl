@@ -943,9 +943,7 @@ class Trainer:
                 dist.broadcast(tensor, src=0)
                 beta_value = float(tensor.item())
                 info["beta_applied"] = beta_value
-                controller._last_beta = beta_value  # type: ignore[attr-defined]
-                if controller._last_info:  # type: ignore[attr-defined]
-                    controller._last_info["beta_applied"] = beta_value  # type: ignore[index]
+                controller.apply_broadcast(beta_value, info)
             except Exception as exc:
                 _log_exception(
                     "beta_controller.broadcast",
