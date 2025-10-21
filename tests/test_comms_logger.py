@@ -2,6 +2,7 @@ import csv
 import os
 import socket
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from mfcl.distributed import all_gather, all_reduce, PayloadCategory
+import mfcl.telemetry.comms_logger as comms_logger_mod
 from mfcl.telemetry.comms_logger import (
     CommsLogger,
     close_comms_logger,
@@ -25,6 +27,95 @@ class _DummyTimer:
     def add_comm_ms(self, value: float) -> None:
         self.calls += 1
         self.total_ms += value
+
+
+def test_record_event_accumulates_bytes_and_time(monkeypatch):
+    logger = CommsLogger(log_path=None)
+    timer = mock.Mock()
+    logger.begin_step(epoch=0, step_index=0, global_step=0, timer=timer)
+
+    fake_tensor = mock.Mock()
+    fake_tensor.element_size.return_value = 4
+    fake_tensor.numel.return_value = 8
+
+    monkeypatch.setattr(torch, "is_tensor", lambda value: value is fake_tensor)
+    logger._step.world_size = 4
+
+    logger.record_event(
+        kind="all_reduce",
+        tensor=fake_tensor,
+        category=PayloadCategory.MOMENTS_SIGMA_FULL,
+        duration_s=0.5,
+    )
+
+    expected_bytes = 48.0  # 2 * (world_size - 1) / world_size * size_bytes
+    assert logger._step.op_bytes.all_reduce == pytest.approx(expected_bytes)
+    assert logger._step.op_time_s.all_reduce == pytest.approx(0.5)
+    assert (
+        logger._step.category_bytes.moments_sigma_full == pytest.approx(expected_bytes)
+    )
+
+    timer.add_comm_ms.assert_called_once()
+    assert timer.add_comm_ms.call_args[0][0] == pytest.approx(500.0)
+
+    logger.end_step()
+    totals = logger.pop_last_step_totals()
+    assert totals == {"bytes_total": pytest.approx(expected_bytes)}
+
+
+def test_record_event_warns_for_unknown_category(monkeypatch):
+    logger = CommsLogger(log_path=None)
+    logger.begin_step(epoch=0, step_index=0, global_step=0, timer=None)
+
+    fake_tensor = mock.Mock()
+    fake_tensor.element_size.return_value = 2
+    fake_tensor.numel.return_value = 4
+    monkeypatch.setattr(torch, "is_tensor", lambda value: value is fake_tensor)
+    logger._step.world_size = 2
+
+    broken_specs = comms_logger_mod._CATEGORY_FIELD_SPECS.copy()
+    broken_specs.pop(PayloadCategory.OTHER)
+    monkeypatch.setattr(
+        comms_logger_mod, "_CATEGORY_FIELD_SPECS", broken_specs, raising=False
+    )
+
+    with pytest.warns(RuntimeWarning, match="payload category"):
+        logger.record_event(
+            kind="all_reduce",
+            tensor=fake_tensor,
+            category=PayloadCategory.OTHER,
+            duration_s=0.1,
+        )
+
+    with pytest.warns(RuntimeWarning, match="Missing CSV columns"):
+        logger.end_step()
+
+
+def test_end_step_warns_when_category_mapping_incomplete(monkeypatch):
+    logger = CommsLogger(log_path=None)
+    logger.begin_step(epoch=0, step_index=0, global_step=0, timer=None)
+
+    fake_tensor = mock.Mock()
+    fake_tensor.element_size.return_value = 4
+    fake_tensor.numel.return_value = 4
+    monkeypatch.setattr(torch, "is_tensor", lambda value: value is fake_tensor)
+    logger._step.world_size = 2
+
+    logger.record_event(
+        kind="all_reduce",
+        tensor=fake_tensor,
+        category=PayloadCategory.FEATURES_ALLGATHER,
+        duration_s=0.2,
+    )
+
+    broken_specs = comms_logger_mod._CATEGORY_FIELD_SPECS.copy()
+    broken_specs.pop(PayloadCategory.TOPR_INDICES)
+    monkeypatch.setattr(
+        comms_logger_mod, "_CATEGORY_FIELD_SPECS", broken_specs, raising=False
+    )
+
+    with pytest.warns(RuntimeWarning, match="Missing CSV columns"):
+        logger.end_step()
 
 
 def test_configure_comms_logger_without_log_path_tracks_stats(tmp_path):

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import csv
 import time
+import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from pathlib import Path
 from typing import IO, Optional, Any
@@ -53,19 +54,83 @@ _OP_KINDS = ("all_reduce", "all_gather", "reduce_scatter", "broadcast")
 
 
 @dataclass
+class _OpAccumulator:
+    all_reduce: float = 0.0
+    all_gather: float = 0.0
+    reduce_scatter: float = 0.0
+    broadcast: float = 0.0
+
+    def reset(self) -> None:
+        for item in fields(self):
+            setattr(self, item.name, 0.0)
+
+    def add(self, kind: str, value: float) -> bool:
+        if not hasattr(self, kind):
+            return False
+        current = getattr(self, kind)
+        setattr(self, kind, current + value)
+        return True
+
+    def total(self) -> float:
+        return sum(getattr(self, item.name) for item in fields(self))
+
+
+_CATEGORY_FIELD_SPECS: dict[PayloadCategory, tuple[str, str]] = {
+    PayloadCategory.FEATURES_ALLGATHER: ("features_allgather", "bytes_features_allgather"),
+    PayloadCategory.MOMENTS_MU: ("moments_mu", "bytes_moments_mu"),
+    PayloadCategory.MOMENTS_SIGMA_FULL: ("moments_sigma_full", "bytes_moments_sigma_full"),
+    PayloadCategory.MOMENTS_SIGMA_DIAG: ("moments_sigma_diag", "bytes_moments_sigma_diag"),
+    PayloadCategory.MIXTURE_MU_K: ("mixture_muK", "bytes_mixture_muK"),
+    PayloadCategory.MIXTURE_SIGMA_K: ("mixture_sigmaK", "bytes_mixture_sigmaK"),
+    PayloadCategory.THIRD_MOMENT_SKETCH: ("third_moment_sketch", "bytes_third_moment_sketch"),
+    PayloadCategory.TOPR_INDICES: ("topr_indices", "bytes_topr_indices"),
+    PayloadCategory.OTHER: ("other", "bytes_other"),
+}
+
+
+@dataclass
+class _CategoryAccumulator:
+    features_allgather: float = 0.0
+    moments_mu: float = 0.0
+    moments_sigma_full: float = 0.0
+    moments_sigma_diag: float = 0.0
+    mixture_muK: float = 0.0
+    mixture_sigmaK: float = 0.0
+    third_moment_sketch: float = 0.0
+    topr_indices: float = 0.0
+    other: float = 0.0
+
+    def reset(self) -> None:
+        for item in fields(self):
+            setattr(self, item.name, 0.0)
+
+    def add(self, category: PayloadCategory, value: float) -> bool:
+        spec = _CATEGORY_FIELD_SPECS.get(category)
+        if spec is None:
+            return False
+        attr_name, _ = spec
+        current = getattr(self, attr_name)
+        setattr(self, attr_name, current + value)
+        return True
+
+    def total(self) -> float:
+        return sum(getattr(self, item.name) for item in fields(self))
+
+
+@dataclass
 class _StepAccumulators:
     epoch: int = 0
     global_step: int = 0
     world_size: int = 1
     timer: Optional[object] = None
-    op_bytes: dict[str, float] | None = None
-    op_time_s: dict[str, float] | None = None
-    category_bytes: dict[PayloadCategory, float] | None = None
+    op_bytes: _OpAccumulator = field(default_factory=_OpAccumulator)
+    op_time_s: _OpAccumulator = field(default_factory=_OpAccumulator)
+    category_bytes: _CategoryAccumulator = field(default_factory=_CategoryAccumulator)
 
     def reset(self) -> None:
-        self.op_bytes = {kind: 0.0 for kind in _OP_KINDS}
-        self.op_time_s = {kind: 0.0 for kind in _OP_KINDS}
-        self.category_bytes = {category: 0.0 for category in PayloadCategory}
+        self.op_bytes.reset()
+        self.op_time_s.reset()
+        self.category_bytes.reset()
 
 
 class CommsLogger:
@@ -78,6 +143,7 @@ class CommsLogger:
         self._active = False
         self._step = _StepAccumulators()
         self._last_step_totals: dict[str, float] | None = None
+        self._step.reset()
 
     @property
     def enabled(self) -> bool:
@@ -116,16 +182,20 @@ class CommsLogger:
             return
         size_bytes = float(tensor.element_size() * tensor.numel())
         bytes_on_wire = _estimate_wire_bytes(kind, size_bytes, self._step.world_size)
-        if self._step.op_bytes is None or self._step.op_time_s is None:
-            self._step.reset()
-        assert self._step.op_bytes is not None
-        assert self._step.op_time_s is not None
-        assert self._step.category_bytes is not None
-        self._step.op_bytes[kind] = self._step.op_bytes.get(kind, 0.0) + bytes_on_wire
-        self._step.op_time_s[kind] = self._step.op_time_s.get(kind, 0.0) + max(0.0, duration_s)
-        self._step.category_bytes[category] = (
-            self._step.category_bytes.get(category, 0.0) + bytes_on_wire
-        )
+        added = self._step.op_bytes.add(kind, bytes_on_wire)
+        if not added:
+            warnings.warn(
+                f"Encountered unrecognized collective kind '{kind}'; event ignored.",
+                RuntimeWarning,
+            )
+            return
+
+        self._step.op_time_s.add(kind, max(0.0, duration_s))
+        if not self._step.category_bytes.add(category, bytes_on_wire):
+            warnings.warn(
+                f"Encountered unrecognized payload category '{category}'; bytes not recorded.",
+                RuntimeWarning,
+            )
 
         timer = self._step.timer
         if timer is not None and hasattr(timer, "add_comm_ms"):
@@ -138,20 +208,18 @@ class CommsLogger:
         if not self._active:
             return
         self._active = False
-        if self._step.op_bytes is None or self._step.op_time_s is None:
-            return
-        bytes_total = sum(self._step.op_bytes.get(kind, 0.0) for kind in _OP_KINDS)
-        total_time_s = sum(self._step.op_time_s.get(kind, 0.0) for kind in _OP_KINDS)
+        bytes_total = self._step.op_bytes.total()
+        total_time_s = self._step.op_time_s.total()
         row = {
             "step": self._step.global_step,
             "epoch": self._step.epoch,
             "world_size": self._step.world_size,
         }
         for kind in _OP_KINDS:
-            row[f"bytes_{kind}"] = self._step.op_bytes.get(kind, 0.0)
+            row[f"bytes_{kind}"] = getattr(self._step.op_bytes, kind)
         row["bytes_total"] = bytes_total
         for kind in _OP_KINDS:
-            row[f"t_{kind}_ms"] = self._step.op_time_s.get(kind, 0.0) * 1000.0
+            row[f"t_{kind}_ms"] = getattr(self._step.op_time_s, kind) * 1000.0
         row["t_total_ms"] = total_time_s * 1000.0
         if total_time_s > 0:
             # Binary (MiB/s) and decimal (MB/s) throughput for clarity.
@@ -161,20 +229,20 @@ class CommsLogger:
             row["eff_bandwidth_MiBps"] = 0.0
             row["eff_bandwidth_MBps"] = 0.0
 
-        assert self._step.category_bytes is not None
-        row.update(
-            {
-                "bytes_features_allgather": self._step.category_bytes[PayloadCategory.FEATURES_ALLGATHER],
-                "bytes_moments_mu": self._step.category_bytes[PayloadCategory.MOMENTS_MU],
-                "bytes_moments_sigma_full": self._step.category_bytes[PayloadCategory.MOMENTS_SIGMA_FULL],
-                "bytes_moments_sigma_diag": self._step.category_bytes[PayloadCategory.MOMENTS_SIGMA_DIAG],
-                "bytes_mixture_muK": self._step.category_bytes[PayloadCategory.MIXTURE_MU_K],
-                "bytes_mixture_sigmaK": self._step.category_bytes[PayloadCategory.MIXTURE_SIGMA_K],
-                "bytes_third_moment_sketch": self._step.category_bytes[PayloadCategory.THIRD_MOMENT_SKETCH],
-                "bytes_topr_indices": self._step.category_bytes[PayloadCategory.TOPR_INDICES],
-                "bytes_other": self._step.category_bytes[PayloadCategory.OTHER],
-            }
-        )
+        missing_categories: list[PayloadCategory] = []
+        for category in PayloadCategory:
+            spec = _CATEGORY_FIELD_SPECS.get(category)
+            if spec is None:
+                missing_categories.append(category)
+                continue
+            attr_name, row_key = spec
+            row[row_key] = getattr(self._step.category_bytes, attr_name)
+        if missing_categories:
+            names = ", ".join(category.name for category in missing_categories)
+            warnings.warn(
+                "Missing CSV columns for payload categories: " + names,
+                RuntimeWarning,
+            )
 
         self._last_step_totals = {"bytes_total": bytes_total}
         self._write_row(row)
