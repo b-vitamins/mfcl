@@ -10,6 +10,7 @@ import torch.nn as nn
 from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
 from mfcl.losses.ntxent import NTXentLoss
+from mfcl.data.schema import extract_labels
 
 
 class SimCLR(BaseMethod):
@@ -55,12 +56,7 @@ class SimCLR(BaseMethod):
         self, *proj: Any, batch: Dict[str, Any]
     ) -> Dict[str, torch.Tensor]:
         z1, z2 = proj
-        label_tensor: Optional[torch.Tensor] = None
-        for key in ("mixture_labels", "target", "label", "labels"):
-            value = batch.get(key) if isinstance(batch, dict) else None
-            if torch.is_tensor(value):
-                label_tensor = value
-                break
+        label_tensor: Optional[torch.Tensor] = extract_labels(batch)
         loss, stats = self.loss_fn(z1, z2, labels=label_tensor)
         stats["loss"] = loss
         return stats

@@ -14,6 +14,7 @@ from mfcl.utils.ema import MomentumUpdater
 from mfcl.utils.queue import RingQueue
 from mfcl.utils import dist as dist_utils
 from mfcl.telemetry.hardness import get_active_monitor
+from mfcl.data.schema import extract_labels
 
 
 class MoCo(BaseMethod):
@@ -95,6 +96,7 @@ class MoCo(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         q, k = proj
+        extract_labels(batch)
         queue_keys_raw = self._queue_keys(k)
         queue_keys = self._format_queue_keys(queue_keys_raw)
         seeded_queue = False
