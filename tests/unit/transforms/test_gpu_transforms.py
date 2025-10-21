@@ -6,6 +6,8 @@ from mfcl.transforms.gpu import (
     build_gpu_augmentor,
     build_gpu_multicrop_pretransform,
     build_gpu_pair_pretransform,
+    make_simclr_gpu_augment,
+    make_swav_gpu_augment,
 )
 
 try:
@@ -77,3 +79,71 @@ def test_multicrop_gpu_augment_returns_crops(device):
         assert crop.device == device
         assert crop.dtype == torch.float32
     assert batch["code_crops"] == (0, 1)
+
+
+def test_simclr_gpu_augment_reuses_pipeline_and_is_stochastic(monkeypatch):
+    cfg = AugConfig(backend="tv2")
+
+    call_count = 0
+
+    def fake_pipeline(cfg_arg, size):
+        nonlocal call_count
+        call_count += 1
+        assert cfg_arg is cfg
+        assert size == cfg.img_size
+
+        def _transform(img: torch.Tensor) -> torch.Tensor:
+            return torch.randn((img.shape[0], size, size), device=img.device)
+
+        return _transform
+
+    monkeypatch.setattr("mfcl.transforms.gpu._simclr_pipeline", fake_pipeline)
+
+    augmentor = make_simclr_gpu_augment(cfg)
+    assert call_count == 1
+
+    base = torch.randint(0, 255, (2, 3, cfg.img_size, cfg.img_size), dtype=torch.uint8)
+
+    out1 = augmentor({"image": base.clone()})
+    out2 = augmentor({"image": base.clone()})
+
+    assert call_count == 1
+    assert "view1" in out1 and "view2" in out1
+    assert out1["view1"].shape[-2:] == (cfg.img_size, cfg.img_size)
+    assert not torch.equal(out1["view1"], out1["view2"])
+    assert not torch.equal(out1["view1"], out2["view1"])
+
+
+def test_swav_gpu_augment_reuses_pipelines_and_is_stochastic(monkeypatch):
+    cfg = AugConfig(local_crops=2, local_size=96, backend="tv2")
+
+    calls = []
+
+    def fake_pipeline(cfg_arg, size, scale):
+        calls.append((size, scale))
+        assert cfg_arg is cfg
+
+        def _transform(img: torch.Tensor) -> torch.Tensor:
+            return torch.randn((img.shape[0], size, size), device=img.device)
+
+        return _transform
+
+    monkeypatch.setattr("mfcl.transforms.gpu._swav_pipeline", fake_pipeline)
+
+    augmentor = make_swav_gpu_augment(cfg)
+    assert calls == [
+        (cfg.img_size, (0.14, 1.0)),
+        (cfg.local_size, (0.05, 0.14)),
+    ]
+
+    base = torch.randint(0, 255, (1, 3, cfg.img_size, cfg.img_size), dtype=torch.uint8)
+
+    out = augmentor({"image": base.clone()})
+    assert len(calls) == 2
+    crops = out["crops"]
+    assert len(crops) == cfg.global_crops + cfg.local_crops
+    assert not torch.equal(crops[0], crops[1])
+    assert not torch.equal(crops[0], crops[-1])
+
+    augmentor({"image": base.clone()})
+    assert len(calls) == 2
