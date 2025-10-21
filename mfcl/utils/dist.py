@@ -180,6 +180,12 @@ def all_gather_tensor(tensor: torch.Tensor, debug_shapes: bool = False) -> torch
 
     world = get_world_size()
 
+    squeeze_result = False
+    gather_tensor = tensor
+    if tensor.ndim == 0:
+        squeeze_result = True
+        gather_tensor = tensor.unsqueeze(0)
+
     if debug_shapes:
         shape_tensor = torch.tensor(
             list(tensor.shape), device=tensor.device, dtype=torch.long
@@ -193,9 +199,14 @@ def all_gather_tensor(tensor: torch.Tensor, debug_shapes: bool = False) -> torch
                     f"all_gather_tensor: tensor shape mismatch across ranks (rank 0 {tuple(reference.tolist())} vs rank {idx} {tuple(shape.tolist())})"
                 )
 
-    tensors = [torch.zeros_like(tensor) for _ in range(world)]
-    dist.all_gather(tensors, tensor)
-    return torch.cat(tensors, dim=0)
+    tensors = [torch.zeros_like(gather_tensor) for _ in range(world)]
+    dist.all_gather(tensors, gather_tensor)
+    gathered = torch.cat(tensors, dim=0)
+
+    if squeeze_result:
+        return gathered.reshape(world, *tensor.shape)
+
+    return gathered
 
 
 def cleanup() -> None:
