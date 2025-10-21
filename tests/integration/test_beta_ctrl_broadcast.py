@@ -98,7 +98,6 @@ def _worker(rank: int, world_size: int, port: int) -> None:
             beta_min=3.0,
             beta_max=12.0,
             ema_window=4,
-            is_main=(rank == 0),
         )
         stats = {
             "pi": torch.tensor([0.5, 0.5], dtype=torch.float32),

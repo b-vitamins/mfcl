@@ -1107,7 +1107,8 @@ class Trainer:
         timer = self.step_timer
         ctx = timer.range_beta_ctrl() if timer is not None else nullcontext()
         with ctx:
-            beta_value, info = controller.step(payload, delta_sigma, beta_raw)
+            result = controller.step(payload, delta_sigma, beta_raw)
+        beta_value = result.beta_applied
         if dist.is_available() and dist.is_initialized():
             try:
                 tensor = torch.tensor(
@@ -1115,8 +1116,7 @@ class Trainer:
                 )
                 dist.broadcast(tensor, src=0)
                 beta_value = float(tensor.item())
-                info["beta_applied"] = beta_value
-                controller.apply_broadcast(beta_value, info)
+                result = controller.apply_broadcast(beta_value, result)
             except Exception as exc:
                 _log_exception(
                     "beta_controller.broadcast",
@@ -1124,8 +1124,7 @@ class Trainer:
                     epoch=epoch,
                     step=global_step,
                 )
-        info["beta_raw"] = beta_raw
-        controller.log_step(step=global_step, epoch=epoch, info=info)
+        controller.log_step(step=global_step, epoch=epoch, result=result)
         self._apply_beta_to_method(
             beta_value,
             epoch=epoch,

@@ -37,7 +37,7 @@ from mfcl.telemetry.fidelity import FidelityProbe
 from mfcl.telemetry.hardness import HardnessMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
-from mfcl.runtime.beta_ctrl import BetaController
+from mfcl.runtime.beta_ctrl import BetaController, BetaControllerCsvLogger
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -664,13 +664,15 @@ def _hydra_entry(cfg: DictConfig) -> None:
             ema_window = int(beta_ctrl_cfg.get("ema_window", 50))
         except Exception:
             ema_window = 50
+        beta_logger = None
+        if save_dir is not None:
+            beta_logger = BetaControllerCsvLogger(save_dir, is_main=is_main_process())
         beta_controller = BetaController(
             target_eps=target_eps,
             beta_min=beta_min,
             beta_max=beta_max,
             ema_window=ema_window,
-            log_dir=save_dir,
-            is_main=is_main_process(),
+            logger=beta_logger,
         )
 
     amp_dtype = getattr(conf.train, "amp_dtype", None)
