@@ -124,11 +124,13 @@ class KNNHook(Hook):
             else:
                 ref_feats = torch.cat((before_feats, after_feats), dim=0)
                 ref_labels = torch.cat((before_labels, after_labels), dim=0)
-            probs = knn_predict(
+            knn_out = knn_predict(
                 feats, ref_feats, ref_labels, k=self.k, temperature=self.temperature
             )
+            probs = knn_out.probs
             _, pred = probs.topk(1, dim=1)
-            top1_sum += (pred.squeeze(1) == targets).float().sum().item()
+            pred_labels = knn_out.label_ids[pred]
+            top1_sum += (pred_labels.squeeze(1) == targets).float().sum().item()
             count += images.size(0)
             start = end
         metrics["knn_top1"] = float(100.0 * top1_sum / max(1, count))

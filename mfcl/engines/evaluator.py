@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from torch.utils.data import (
     SequentialSampler,
 )
 
-from mfcl.metrics.knn import knn_predict
+from mfcl.metrics.knn import KNNOutput, knn_predict
 from mfcl.utils.amp import AmpScaler
 
 
@@ -35,7 +35,7 @@ def _autocast(enabled: bool):
 
 
 def _accuracy(
-    output: torch.Tensor, target: torch.Tensor, topk=(1, 5)
+    output: Union[torch.Tensor, KNNOutput], target: torch.Tensor, topk=(1, 5)
 ) -> Tuple[float, float]:
     """Compute top-k accuracies, clamping k to num classes.
 
@@ -43,12 +43,30 @@ def _accuracy(
     but if the number of classes is < 5, the top-5 value is computed
     as top-C where C is the number of classes.
     """
+    if isinstance(output, KNNOutput):
+        probs = output.probs
+        label_ids = output.label_ids.to(target.device)
+        max_label = int(label_ids.max().item())
+        remap = torch.full(
+            (max_label + 1,),
+            -1,
+            dtype=torch.long,
+            device=target.device,
+        )
+        remap[label_ids] = torch.arange(label_ids.numel(), device=target.device)
+        mapped_target = remap[target]
+        if (mapped_target < 0).any():
+            raise ValueError("Targets contain ids not present in kNN bank")
+        target = mapped_target
+    else:
+        probs = output
+
     B = target.size(0)
-    C = output.size(1)
+    C = probs.size(1)
     req = list(topk)
     ks = [min(int(k), C) for k in req]
     maxk = max(ks)
-    _, pred = output.topk(maxk, 1, True, True)
+    _, pred = probs.topk(maxk, 1, True, True)
     pred = pred.t()
     correct = pred.eq(target.view(1, -1).expand_as(pred))
     res = []
@@ -278,11 +296,11 @@ class KNNEval:
             feats = encoder(images)
             if self.normalize:
                 feats = torch.nn.functional.normalize(feats, dim=1)
-            probs = knn_predict(
+            knn_out = knn_predict(
                 feats, bank_feats, bank_labels, k=self.k, temperature=self.temperature
             )
             # _accuracy operates on logits or probabilities; kNN already outputs probabilities.
-            t1, t5 = _accuracy(probs, targets, topk=(1, 5))
+            t1, t5 = _accuracy(knn_out, targets, topk=(1, 5))
             top1_sum += t1 * images.size(0)
             top5_sum += t5 * images.size(0)
             count += images.size(0)

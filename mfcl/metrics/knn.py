@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import torch.nn.functional as F
+
+
+class KNNOutput(NamedTuple):
+    probs: torch.Tensor
+    label_ids: torch.Tensor
 
 
 @torch.no_grad()
@@ -13,7 +20,7 @@ def knn_predict(
     bank_labels: torch.Tensor,  # [N]
     k: int = 200,
     temperature: float = 0.07,
-) -> torch.Tensor:
+) -> KNNOutput:
     """Return class probabilities [B, C] using kNN with temperature-smoothed votes.
 
     Steps:
@@ -49,7 +56,7 @@ def knn_predict(
     one_hot = F.one_hot(neighbor_labels, num_classes=num_classes).to(weights.dtype)  # [B,k,C]
     class_votes = (one_hot * weights.unsqueeze(-1)).sum(dim=1)  # [B,C]
     class_votes = class_votes / (class_votes.sum(dim=1, keepdim=True) + 1e-12)
-    return class_votes
+    return KNNOutput(class_votes, unique_labels)
 
 
-__all__ = ["knn_predict"]
+__all__ = ["KNNOutput", "knn_predict"]
