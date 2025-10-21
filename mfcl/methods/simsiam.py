@@ -11,6 +11,7 @@ from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
 from mfcl.models.heads.predictor import Predictor
 from mfcl.losses.simsiamloss import SimSiamLoss
+from mfcl.data.schema import extract_labels
 
 
 class SimSiam(BaseMethod):
@@ -43,6 +44,7 @@ class SimSiam(BaseMethod):
         self, *proj: Any, batch: Dict[str, Any]
     ) -> Dict[str, torch.Tensor]:
         p1, z2, p2, z1 = proj
+        extract_labels(batch)
         loss, stats = self.loss_fn(p1, z2, p2, z1)
         stats["loss"] = loss
         return stats

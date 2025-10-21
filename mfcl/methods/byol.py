@@ -14,6 +14,7 @@ from mfcl.models.heads.projector import Projector
 from mfcl.models.heads.predictor import Predictor
 from mfcl.losses.byolloss import BYOLLoss
 from mfcl.utils.ema import MomentumUpdater
+from mfcl.data.schema import extract_labels
 
 
 class BYOL(BaseMethod):
@@ -102,6 +103,7 @@ class BYOL(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
         p1, z2_k, p2, z1_k = proj
+        extract_labels(batch)
         loss, stats = self.loss_fn(p1, z2_k, p2, z1_k)  # type: ignore[arg-type]
         stats["loss"] = loss
         stats.setdefault(

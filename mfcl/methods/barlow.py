@@ -10,6 +10,7 @@ import torch.nn as nn
 from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
 from mfcl.losses.barlowtwins import BarlowTwinsLoss
+from mfcl.data.schema import extract_labels
 
 
 class BarlowTwins(BaseMethod):
@@ -39,6 +40,7 @@ class BarlowTwins(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         z1, z2 = proj
+        extract_labels(batch)
         loss, stats = self.loss_fn(z1, z2)
         stats["loss"] = loss
         return stats

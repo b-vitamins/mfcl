@@ -12,6 +12,7 @@ from mfcl.methods.base import BaseMethod
 from mfcl.models.heads.projector import Projector
 from mfcl.models.prototypes.swavproto import SwAVPrototypes
 from mfcl.losses.swavloss import SwAVLoss
+from mfcl.data.schema import extract_labels
 
 
 class SwAV(BaseMethod):
@@ -77,6 +78,7 @@ class SwAV(BaseMethod):
 
     def compute_loss(self, *proj: Any, batch: Dict[str, Any]):
         logits, code_idx = proj
+        extract_labels(batch)
         queue_logits = self._gather_queue_logits(logits, code_idx)
         loss, stats = self.loss_fn(logits, code_idx, queue_logits=queue_logits)  # type: ignore[arg-type]
         stats["loss"] = loss
