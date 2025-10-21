@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from mfcl.data.collate import collate_pair, collate_multicrop, collate_linear
+from mfcl.data.collate import (
+    collate_linear,
+    collate_multicrop,
+    collate_pair,
+)
 
 
 def test_collate_pair_shapes():
