@@ -25,7 +25,7 @@ from mfcl.telemetry.memory import MemoryMonitor
 from mfcl.telemetry.power import PowerMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
-from mfcl.runtime.beta_ctrl import BetaController
+from mfcl.runtime.beta_ctrl import BetaController, BetaControllerLogger, BetaControllerResult
 from mfcl.utils.amp import AmpScaler
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from mfcl.utils.dist import (
@@ -85,6 +85,7 @@ class Trainer:
         mixture_estimator: Any | None = None,
         topr_monitor: Any | None = None,
         beta_controller: Optional[BetaController] = None,
+        beta_controller_logger: Optional[BetaControllerLogger] = None,
         third_moment_sketch: Any | None = None,
         ) -> None:
         """Construct the trainer.
@@ -153,6 +154,7 @@ class Trainer:
         self.topr_monitor = topr_monitor
         self.third_moment = third_moment_sketch
         self.beta_controller = beta_controller
+        self.beta_controller_logger = beta_controller_logger
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
         except Exception:
@@ -452,7 +454,10 @@ class Trainer:
         timer = self.step_timer
         ctx = timer.range_beta_ctrl() if timer is not None else nullcontext()
         with ctx:
-            beta_value, info = controller.step(payload, delta_sigma, beta_raw)
+            result = controller.step(payload, delta_sigma, beta_raw)
+        beta_value = float(result.beta)
+        info = dict(result.info)
+        info.setdefault("beta_raw", beta_raw)
         if dist.is_available() and dist.is_initialized():
             try:
                 tensor = torch.tensor(
@@ -462,6 +467,7 @@ class Trainer:
                 beta_value = float(tensor.item())
                 info["beta_applied"] = beta_value
                 controller.apply_broadcast(beta_value, info)
+                result = BetaControllerResult(beta=beta_value, info=dict(info))
             except Exception as exc:
                 log_exception(
                     "beta_controller.broadcast",
@@ -469,8 +475,17 @@ class Trainer:
                     epoch=epoch,
                     step=global_step,
                 )
-        info["beta_raw"] = beta_raw
-        controller.log_step(step=global_step, epoch=epoch, info=info)
+        logger = self.beta_controller_logger
+        if logger is not None:
+            try:
+                logger.log(step=global_step, epoch=epoch, result=result)
+            except Exception as exc:
+                log_exception(
+                    "beta_controller.logger",
+                    exc,
+                    epoch=epoch,
+                    step=global_step,
+                )
         self._apply_beta_to_method(
             beta_value,
             epoch=epoch,
@@ -624,75 +639,7 @@ class Trainer:
                 )
         return 0.0
 
-    def _maybe_update_topr(self, *, epoch: int, global_step: int) -> None:
-        monitor = self.topr_monitor
-        estimator = self.mixture_estimator
-        if monitor is None or estimator is None:
-            return
-        stats = getattr(estimator, "_last_stats", None)
-        if not isinstance(stats, dict) or not stats:
-            return
-        pi = stats.get("pi")
-        mu = stats.get("mu")
-        sigma = stats.get("Sigma")
-        if pi is None or mu is None or sigma is None:
-            return
-        responsibilities = stats.get("R")
-        Q = stats.get("Q") if isinstance(stats.get("Q"), torch.Tensor) else None
-        beta_value = self._current_beta_value(epoch=epoch, step=global_step)
-        timer = self.step_timer
-        ctx = timer.range_topr() if timer is not None else nullcontext()
-        with ctx:
-            monitor.update(
-                responsibilities=responsibilities,
-                pi=pi,
-                mu=mu,
-                Sigma=sigma,
-                beta=beta_value,
-                Q=Q,
-            )
 
-    def _maybe_update_beta_controller(self, *, epoch: int, global_step: int) -> None:
-        controller = self.beta_controller
-        estimator = self.mixture_estimator
-        if controller is None or estimator is None:
-            return
-        stats = getattr(estimator, "_last_stats", None)
-        if not isinstance(stats, dict) or not stats:
-            return
-        payload: Dict[str, Any] = {}
-        for key in ("pi", "pi_min", "median_xBx"):
-            if key in stats:
-                payload[key] = stats[key]
-        delta_sigma = stats.get("delta_sigma_max")
-        beta_raw = self._beta_ctrl_raw()
-        timer = self.step_timer
-        ctx = timer.range_beta_ctrl() if timer is not None else nullcontext()
-        with ctx:
-            beta_value, info = controller.step(payload, delta_sigma, beta_raw)
-        if dist.is_available() and dist.is_initialized():
-            try:
-                tensor = torch.tensor(
-                    [beta_value], device=self.device, dtype=torch.float32
-                )
-                dist.broadcast(tensor, src=0)
-                beta_value = float(tensor.item())
-                info["beta_applied"] = beta_value
-                controller.apply_broadcast(beta_value, info)
-            except Exception as exc:
-                log_exception(
-                    "beta_controller.broadcast",
-                    exc,
-                    epoch=epoch,
-                    step=global_step,
-                )
-        info["beta_raw"] = beta_raw
-        controller.log_step(step=global_step, epoch=epoch, info=info)
-        self._apply_beta_to_method(
-            beta_value,
-            epoch=epoch,
-            step=global_step,
-        )
 
     def _apply_optimizer_step(
         self,

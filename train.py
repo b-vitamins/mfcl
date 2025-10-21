@@ -37,7 +37,7 @@ from mfcl.telemetry.fidelity import FidelityProbe
 from mfcl.telemetry.hardness import HardnessMonitor
 from mfcl.telemetry.stability import StabilitySentry
 from mfcl.runtime.budget import BudgetTracker
-from mfcl.runtime.beta_ctrl import BetaController
+from mfcl.runtime.beta_ctrl import BetaController, BetaControllerCSVLogger
 from mfcl.utils.dist import (
     get_local_rank,
     get_world_size,
@@ -639,6 +639,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     beta_ctrl_cfg = runtime_cfg.get("beta_ctrl", {}) if isinstance(runtime_cfg, dict) else {}
     beta_controller: BetaController | None = None
+    beta_logger: BetaControllerCSVLogger | None = None
     beta_ctrl_enabled = isinstance(beta_ctrl_cfg, dict) and bool(
         beta_ctrl_cfg.get("enabled", False)
     )
@@ -669,9 +670,12 @@ def _hydra_entry(cfg: DictConfig) -> None:
             beta_min=beta_min,
             beta_max=beta_max,
             ema_window=ema_window,
-            log_dir=save_dir,
-            is_main=is_main_process(),
         )
+        if save_dir is not None:
+            beta_logger = BetaControllerCSVLogger(
+                save_dir,
+                is_main=is_main_process(),
+            )
 
     amp_dtype = getattr(conf.train, "amp_dtype", None)
     amp_enabled = bool(getattr(conf.train, "amp", True))
@@ -705,6 +709,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         scaler=scaler,
         stability_sentry=stability_sentry,
         beta_controller=beta_controller,
+        beta_controller_logger=beta_logger,
         third_moment_sketch=third_moment_sketch,
     )
 
@@ -734,6 +739,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
             topr_monitor.close()
         if beta_controller is not None:
             beta_controller.close()
+        if beta_logger is not None:
+            beta_logger.close()
         if third_moment_sketch is not None:
             third_moment_sketch.close()
 
