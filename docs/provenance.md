@@ -57,6 +57,13 @@ provenance: true
 Disable provenance for performance-sensitive debugging by launching with
 `runtime.provenance=false`.
 
+## Precision controls
+
+Training enables TensorFloat-32 kernels on CUDA builds by default to balance
+throughput and precision. Set `train.allow_tf32=false` (or launch with
+`--no-allow-tf32`) to keep matmul and cuDNN on FP32 paths when reproducibility
+or stricter numerical parity is required.
+
 ## Deterministic manifests
 
 When the repository is clean and the configuration is unchanged, the contents

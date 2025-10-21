@@ -241,7 +241,12 @@ def _hydra_entry(cfg: DictConfig) -> None:
     if _CLI_FLAGS.get("print_config", False) and is_main_process():
         print(OmegaConf.to_yaml(cfg, resolve=True))
     deterministic_mode = True
-    set_seed(conf.train.seed, deterministic=deterministic_mode)
+    allow_tf32 = bool(getattr(conf.train, "allow_tf32", True))
+    set_seed(
+        conf.train.seed,
+        deterministic=deterministic_mode,
+        allow_tf32=allow_tf32,
+    )
 
     cuda_available = torch.cuda.is_available()
     if cuda_available:
@@ -249,8 +254,8 @@ def _hydra_entry(cfg: DictConfig) -> None:
 
     if cuda_available:
         device = torch.device("cuda", get_local_rank())
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = bool(allow_tf32)
+        torch.backends.cudnn.allow_tf32 = bool(allow_tf32)
     else:
         device = torch.device("cpu")
     if hasattr(torch, "set_float32_matmul_precision"):
@@ -839,6 +844,8 @@ def _cli_overrides(args: argparse.Namespace, extra: Sequence[str]) -> list[str]:
         overrides.append(f"train.loss_fp32={'true' if args.loss_fp32 else 'false'}")
     if args.cudnn_bench is not None:
         overrides.append(f"train.cudnn_bench={'true' if args.cudnn_bench else 'false'}")
+    if args.allow_tf32 is not None:
+        overrides.append(f"train.allow_tf32={'true' if args.allow_tf32 else 'false'}")
     if args.seed is not None:
         overrides.append(f"train.seed={int(args.seed)}")
     if args.run_dir:
@@ -1013,6 +1020,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable cudnn benchmark heuristic selection.",
     )
     parser.set_defaults(cudnn_bench=None)
+    tf32_group = parser.add_mutually_exclusive_group()
+    tf32_group.add_argument(
+        "--allow-tf32",
+        dest="allow_tf32",
+        action="store_true",
+        help="Enable TF32 kernels for matmul and cuDNN backends.",
+    )
+    tf32_group.add_argument(
+        "--no-allow-tf32",
+        dest="allow_tf32",
+        action="store_false",
+        help="Disable TF32 kernels even when available on CUDA.",
+    )
+    parser.set_defaults(allow_tf32=None)
     parser.add_argument("--seed", type=int, help="Random seed.")
     parser.add_argument("--run-dir", help="Explicit checkpoint directory (train.save_dir).")
     parser.add_argument(

@@ -60,6 +60,7 @@ include:
 | `--epochs` / `--warmup` | Adjust schedule length. |
 | `--lr`, `--weight-decay`, `--momentum`, `--beta1`, `--beta2` | Tune optimizer hyperparameters. |
 | `--knn` / `--knn-period` / `--knn-bank-device` | Enable periodic kNN evaluation (defaults: every 20 epochs, GPU feature bank). |
+| `--allow-tf32` / `--no-allow-tf32` | Control TF32 matmul/cuDNN kernels for CUDA builds. |
 | `--run-dir` | Force checkpoints into a specific directory. |
 
 Additional overrides can be appended in Hydra syntax (e.g.
