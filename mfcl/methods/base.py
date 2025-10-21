@@ -72,8 +72,7 @@ class BaseMethod(nn.Module):
                 and p.device != batch_tensor.device
             ):
                 raise RuntimeError(
-                    f"Model is on {p.device} but batch tensor is on {batch_tensor.device}. "
-                    "Move modules in the trainer, not inside the method."
+                    f"Model is on {p.device} but batch tensor is on {batch_tensor.device}. Move modules in the trainer, not inside the method."
                 )
 
         proj = self.forward_views(batch)

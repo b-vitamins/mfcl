@@ -29,5 +29,8 @@ def test_base_method_step_device_mismatch():
     batch = {"x": torch.ones(2, 3, device="meta")}
     with pytest.raises(RuntimeError) as exc:
         m.step(batch)
-    assert "cpu" in str(exc.value)
-    assert "meta" in str(exc.value)
+    expected_message = (
+        "Model is on cpu but batch tensor is on meta. "
+        "Move modules in the trainer, not inside the method."
+    )
+    assert str(exc.value) == expected_message
