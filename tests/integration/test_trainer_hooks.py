@@ -4,6 +4,7 @@ import torch
 
 from mfcl.engines.hooks import Hook
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -67,9 +68,11 @@ def test_trainer_hook_receives_steps_and_metrics(tmp_path):
     trainer = Trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
-        hooks=hook,
-        save_dir=str(tmp_path),
+        options=TrainerOptions(
+            console=ConsoleMonitor(),
+            hooks=hook,
+            save_dir=str(tmp_path),
+        ),
     )
     trainer.fit(_loader(), epochs=1)
 

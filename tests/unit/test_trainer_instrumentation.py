@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.telemetry.timers import StepTimer
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
@@ -76,10 +77,12 @@ def test_trainer_epoch_with_instrumentation(tmp_path: Path) -> None:
     trainer = Trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
-        timer=timer,
-        memory_monitor=memory_monitor,
-        hardness_monitor=hardness_monitor,
+        options=TrainerOptions(
+            console=ConsoleMonitor(),
+            timer=timer,
+            memory_monitor=memory_monitor,
+            hardness_monitor=hardness_monitor,
+        ),
     )
 
     loader = _make_loader(num_batches=3)

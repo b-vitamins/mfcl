@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -42,7 +43,11 @@ def _dummy_loader(B: int = 4, H: int = 8):
 def test_trainer_smoke(tmp_path: Path):
     method = DummyMethod()
     opt = torch.optim.SGD(method.parameters(), lr=0.1)
-    trainer = Trainer(method, opt, console=ConsoleMonitor(), save_dir=str(tmp_path))
+    trainer = Trainer(
+        method,
+        opt,
+        options=TrainerOptions(console=ConsoleMonitor(), save_dir=str(tmp_path)),
+    )
     loader = _dummy_loader()
     trainer.fit(loader, epochs=1)
     # checkpoint should exist

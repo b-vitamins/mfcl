@@ -4,6 +4,7 @@ import torch
 
 from mfcl.runtime.budget import BudgetTracker
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -59,10 +60,12 @@ def test_budget_tokens_with_accumulation(tmp_path: Path):
     trainer = Trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
-        save_dir=str(tmp_path),
-        accum_steps=2,
-        budget_tracker=tracker,
+        options=TrainerOptions(
+            console=ConsoleMonitor(),
+            save_dir=str(tmp_path),
+            accum_steps=2,
+            budget_tracker=tracker,
+        ),
     )
     loader = _toy_loader(batch_size=2, steps=5)
     trainer.fit(loader, epochs=3, eval_every=10, save_every=10)

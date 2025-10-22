@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -45,11 +46,11 @@ def _make_loader(num_batches: int = 1):
 def _make_trainer(**kwargs) -> Trainer:
     method = _MethodWithHooks()
     optimizer = torch.optim.SGD(method.parameters(), lr=0.1)
+    options = TrainerOptions(console=ConsoleMonitor(), **kwargs)
     return Trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
-        **kwargs,
+        options=options,
     )
 
 

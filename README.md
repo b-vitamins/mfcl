@@ -66,6 +66,34 @@ include:
 Additional overrides can be appended in Hydra syntax (e.g.
 `method.temperature=0.2`).
 
+### Customising the trainer
+
+Programmatic use of the trainer now revolves around
+`TrainerOptions`, a dataclass that captures the optional monitors,
+gradient-scaling knobs, and checkpointing policy in a single object.
+This keeps call sites compact while still exposing every hook and
+telemetry integration.【F:mfcl/engines/trainer_options.py†L1-L55】 For
+example:
+
+```python
+from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
+from mfcl.telemetry.memory import MemoryMonitor
+
+options = TrainerOptions(
+    save_dir="./runs/demo",
+    accum_steps=4,
+    log_interval=10,
+    memory_monitor=MemoryMonitor(),
+)
+trainer = Trainer(method, optimizer, scheduler=scheduler, options=options)
+```
+
+You can keep a template `TrainerOptions` and override fields with
+`dataclasses.replace` when launching multiple jobs. Legacy keyword
+arguments are still accepted and override the dataclass fields so
+existing scripts continue to work during the transition.【F:mfcl/engines/trainer.py†L90-L155】
+
 ### Quick synthetic shakeout
 
 The synthetic preset relies on `torchvision.datasets.FakeData`, letting

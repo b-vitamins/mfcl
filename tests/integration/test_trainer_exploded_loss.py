@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -32,6 +33,10 @@ def _loader_once():
 def test_trainer_raises_on_nan_loss(tmp_path):
     m = NaNMethod()
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
-    t = Trainer(m, opt, console=ConsoleMonitor(), save_dir=str(tmp_path))
+    t = Trainer(
+        m,
+        opt,
+        options=TrainerOptions(console=ConsoleMonitor(), save_dir=str(tmp_path)),
+    )
     with pytest.raises(RuntimeError):
         t.fit(_loader_once(), epochs=1)
