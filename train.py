@@ -24,6 +24,7 @@ from mfcl.core.factory import (
 )
 from mfcl.engines.hooks import Hook, HookList
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.metrics.knn import knn_predict
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from mfcl.utils.amp import AmpScaler
@@ -683,10 +684,7 @@ def _hydra_entry(cfg: DictConfig) -> None:
         amp_enabled = False
     scaler = AmpScaler(enabled=amp_enabled, amp_dtype=amp_dtype)
 
-    trainer = Trainer(
-        method,
-        optimizer,
-        scheduler=scheduler,
+    trainer_options = TrainerOptions(
         console=console,
         device=device,
         hooks=hooks,
@@ -711,6 +709,13 @@ def _hydra_entry(cfg: DictConfig) -> None:
         beta_controller=beta_controller,
         beta_controller_logger=beta_logger,
         third_moment_sketch=third_moment_sketch,
+    )
+
+    trainer = Trainer(
+        method,
+        optimizer,
+        scheduler=scheduler,
+        options=trainer_options,
     )
 
     try:

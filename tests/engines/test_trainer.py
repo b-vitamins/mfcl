@@ -6,6 +6,7 @@ from typing import Dict, List
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.engines.context import current_trainer, trainer_context
 from mfcl.engines.hooks import Hook
 from mfcl.runtime.budget import BudgetTracker
@@ -45,10 +46,22 @@ def _toy_loader(batch_size: int = 2, steps: int = 4):
     return _Loader()
 
 
+def _make_trainer(
+    method: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    **option_kwargs,
+) -> Trainer:
+    return Trainer(
+        method,
+        optimizer,
+        options=TrainerOptions(console=ConsoleMonitor(), **option_kwargs),
+    )
+
+
 def test_trainer_context_sets_current_trainer():
     method = _LinearMethod()
     optimizer = torch.optim.SGD(method.parameters(), lr=0.1)
-    trainer = Trainer(method, optimizer, console=ConsoleMonitor())
+    trainer = _make_trainer(method, optimizer)
 
     assert current_trainer() is None
     with trainer_context(trainer) as active:
@@ -98,10 +111,9 @@ class _HookRecorder(Hook):
 def test_checkpoint_roundtrip(tmp_path: Path):
     method = _LinearMethod()
     optimizer = torch.optim.SGD(method.parameters(), lr=0.1)
-    trainer = Trainer(
+    trainer = _make_trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path),
         keep_k=2,
     )
@@ -115,10 +127,9 @@ def test_checkpoint_roundtrip(tmp_path: Path):
     # New trainer should resume from the saved checkpoint and continue training.
     new_method = _LinearMethod()
     new_optimizer = torch.optim.SGD(new_method.parameters(), lr=0.1)
-    resumed = Trainer(
+    resumed = _make_trainer(
         new_method,
         new_optimizer,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path),
     )
     next_epoch = resumed._checkpoint_manager.resume_from(str(checkpoint))
@@ -133,10 +144,9 @@ def test_budget_enforcer_stops(tmp_path: Path):
     method = _LinearMethod()
     optimizer = torch.optim.SGD(method.parameters(), lr=0.1)
     tracker = BudgetTracker("iso_tokens", {"max_tokens": 4})
-    trainer = Trainer(
+    trainer = _make_trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path),
         budget_tracker=tracker,
     )
@@ -154,10 +164,9 @@ def test_telemetry_hooks_operate(tmp_path: Path):
     optimizer = torch.optim.SGD(method.parameters(), lr=0.01)
     timer = _RecordingTimer()
     hook = _HookRecorder()
-    trainer = Trainer(
+    trainer = _make_trainer(
         method,
         optimizer,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path),
         hooks=hook,
         timer=timer,

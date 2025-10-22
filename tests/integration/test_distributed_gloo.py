@@ -21,6 +21,7 @@ from mfcl.core.config import (
 )
 from mfcl.core.factory import build_data, build_optimizer, build_sched
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from mfcl.utils.dist import cleanup, get_rank, get_world_size, init_distributed, unwrap_ddp
 
@@ -115,10 +116,12 @@ def _worker(rank: int, world_size: int, port: int, tmpdir: str, epochs: int = 1)
             method,
             optimizer,
             scheduler=scheduler,
-            console=ConsoleMonitor(),
-            device=torch.device("cpu"),
-            save_dir=str(tmpdir),
-            scheduler_step_on="epoch",
+            options=TrainerOptions(
+                console=ConsoleMonitor(),
+                device=torch.device("cpu"),
+                save_dir=str(tmpdir),
+                scheduler_step_on="epoch",
+            ),
         )
         trainer.fit(train_loader, epochs=epochs, save_every=1, eval_every=1)
 

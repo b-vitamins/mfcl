@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.runtime.beta_ctrl import BetaController
 from mfcl.utils.consolemonitor import ConsoleMonitor
 from mfcl.utils.dist import cleanup, init_distributed
@@ -109,10 +110,12 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         trainer = Trainer(
             method,
             optimizer,
-            console=ConsoleMonitor(),
-            device=torch.device("cpu"),
-            beta_controller=controller,
-            mixture_estimator=estimator,
+            options=TrainerOptions(
+                console=ConsoleMonitor(),
+                device=torch.device("cpu"),
+                beta_controller=controller,
+                mixture_estimator=estimator,
+            ),
         )
 
         trainer._maybe_update_beta_controller(epoch=0, global_step=1)
@@ -151,9 +154,11 @@ def _budget_worker(rank: int, world_size: int, port: int) -> None:
         trainer = Trainer(
             method,
             optimizer,
-            console=ConsoleMonitor(),
-            device=torch.device("cpu"),
-            budget_tracker=budget,
+            options=TrainerOptions(
+                console=ConsoleMonitor(),
+                device=torch.device("cpu"),
+                budget_tracker=budget,
+            ),
         )
 
         loader = _ToyIterable(length=4)

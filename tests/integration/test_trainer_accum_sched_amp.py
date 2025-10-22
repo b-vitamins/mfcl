@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -35,16 +36,30 @@ def _loader_const(N=4):
     return _It()
 
 
+def _make_trainer(
+    method: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    scheduler=None,
+    **option_kwargs,
+) -> Trainer:
+    return Trainer(
+        method,
+        optimizer,
+        scheduler=scheduler,
+        options=TrainerOptions(console=ConsoleMonitor(), **option_kwargs),
+    )
+
+
 def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     # Baseline: accum_steps=1
     m1 = LinearLossMethod()
     opt1 = torch.optim.SGD(m1.parameters(), lr=0.1)
     sched1 = torch.optim.lr_scheduler.StepLR(opt1, step_size=1, gamma=1.0)
-    t1 = Trainer(
+    t1 = _make_trainer(
         m1,
         opt1,
         scheduler=sched1,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path / "r1"),
         accum_steps=1,
         scheduler_step_on="batch",
@@ -56,11 +71,10 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     m2 = LinearLossMethod()
     opt2 = torch.optim.SGD(m2.parameters(), lr=0.1)
     sched2 = torch.optim.lr_scheduler.StepLR(opt2, step_size=1, gamma=1.0)
-    t2 = Trainer(
+    t2 = _make_trainer(
         m2,
         opt2,
         scheduler=sched2,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path / "r2"),
         accum_steps=2,
         scheduler_step_on="batch",
@@ -82,11 +96,10 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     sched_flush_base = torch.optim.lr_scheduler.StepLR(
         opt_flush_base, step_size=1, gamma=1.0
     )
-    t_flush_base = Trainer(
+    t_flush_base = _make_trainer(
         m_flush_base,
         opt_flush_base,
         scheduler=sched_flush_base,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path / "r_flush_base"),
         accum_steps=1,
         scheduler_step_on="batch",
@@ -99,11 +112,10 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     sched_flush_accum = torch.optim.lr_scheduler.StepLR(
         opt_flush_accum, step_size=1, gamma=1.0
     )
-    t_flush_accum = Trainer(
+    t_flush_accum = _make_trainer(
         m_flush_accum,
         opt_flush_accum,
         scheduler=sched_flush_accum,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path / "r_flush_accum"),
         accum_steps=2,
         scheduler_step_on="batch",
@@ -117,11 +129,10 @@ def test_accumulation_equivalence_and_scheduler(tmp_path: Path):
     m3 = LinearLossMethod()
     opt3 = torch.optim.SGD(m3.parameters(), lr=0.1)
     sched3 = torch.optim.lr_scheduler.StepLR(opt3, step_size=1, gamma=0.9)
-    t3 = Trainer(
+    t3 = _make_trainer(
         m3,
         opt3,
         scheduler=sched3,
-        console=ConsoleMonitor(),
         save_dir=str(tmp_path / "r3"),
         accum_steps=1,
         scheduler_step_on="epoch",
@@ -139,7 +150,10 @@ def test_amp_cuda_runs_if_available(tmp_path: Path):
         pytest.skip("no cuda")
     m = LinearLossMethod().to("cuda")
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
-    t = Trainer(
-        m, opt, console=ConsoleMonitor(), save_dir=str(tmp_path / "r"), accum_steps=1
+    t = _make_trainer(
+        m,
+        opt,
+        save_dir=str(tmp_path / "r"),
+        accum_steps=1,
     )
     t.fit(_loader_const(2), epochs=1)

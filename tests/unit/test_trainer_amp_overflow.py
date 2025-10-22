@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.utils.consolemonitor import ConsoleMonitor
 
 
@@ -90,10 +91,12 @@ def test_scheduler_skips_when_amp_overflow(tmp_path: Path):
         method,
         opt,
         scheduler=sched,
-        scaler=scaler,
-        console=ConsoleMonitor(),
-        save_dir=str(tmp_path / "overflow"),
-        scheduler_step_on="batch",
+        options=TrainerOptions(
+            scaler=scaler,
+            console=ConsoleMonitor(),
+            save_dir=str(tmp_path / "overflow"),
+            scheduler_step_on="batch",
+        ),
     )
 
     before = method.weight.detach().clone()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from mfcl.engines.trainer import Trainer
+from mfcl.engines.trainer_options import TrainerOptions
 from mfcl.moments.third import ThirdMomentSketch
 from mfcl.moments.third import get_active_sketch
 from mfcl.mixture.context import get_active_estimator
@@ -75,10 +76,12 @@ def test_trainer_sets_sketch_mean_and_updates(tmp_path, monkeypatch):
     trainer = Trainer(
         method=method,
         optimizer=optimizer,
-        mixture_estimator=estimator,
-        third_moment_sketch=sketch,
-        save_dir=None,
-        log_interval=1,
+        options=TrainerOptions(
+            mixture_estimator=estimator,
+            third_moment_sketch=sketch,
+            save_dir=None,
+            log_interval=1,
+        ),
     )
 
     trainer.fit([batch], epochs=1, save_every=2)

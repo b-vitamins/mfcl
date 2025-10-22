@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import nullcontext
+from dataclasses import fields as dataclass_fields, replace
 from typing import Any, Dict, Optional, Iterable, Callable
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ from .context import trainer_context
 from .logging import log_exception
 from .step_executor import StepExecutor
 from .telemetry import TelemetryManager
+from .trainer_options import TrainerOptions
 
 
 class _TrainableMethod(Protocol):
@@ -62,99 +64,78 @@ class Trainer:
         method: _TrainableMethod,
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[SchedulerBase] = None,
-        console: Optional[ConsoleMonitor] = None,
-        device: Optional[torch.device] = None,
-        scaler: Optional[AmpScaler] = None,
-        hooks: Optional[Hook | HookList] = None,
-        save_dir: Optional[str] = None,
-        keep_k: int = 3,
-        log_interval: int = 1,
-        accum_steps: int = 1,
-        clip_grad: Optional[float] = None,
-        scheduler_step_on: str = "batch",
-        guard_grad_nan: bool = False,
-        channels_last_inputs: bool = False,
-        gpu_augmentor: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-        timer: Optional[StepTimer] = None,
-        memory_monitor: Optional[MemoryMonitor] = None,
-        energy_monitor: Optional[PowerMonitor] = None,
-        budget_tracker: Optional[BudgetTracker] = None,
-        fidelity_probe: Any | None = None,
-        hardness_monitor: "HardnessMonitor | None" = None,
-        stability_sentry: StabilitySentry | None = None,
-        mixture_estimator: Any | None = None,
-        topr_monitor: Any | None = None,
-        beta_controller: Optional[BetaController] = None,
-        beta_controller_logger: Optional[BetaControllerLogger] = None,
-        third_moment_sketch: Any | None = None,
-        ) -> None:
+        *,
+        options: TrainerOptions | None = None,
+        **legacy_kwargs: Any,
+    ) -> None:
         """Construct the trainer.
 
         Args:
             method: mfcl.methods.BaseMethod subclass with .step() and optional hooks.
             optimizer: Torch optimizer for method parameters.
             scheduler: Optional LR scheduler.
-            console: ConsoleMonitor for live, clean logging.
-            device: Compute device. If None, infer from CUDA availability.
-            scaler: AMP scaler wrapper. If None, create default.
-            hooks: Optional extra hooks (single or composite).
-            save_dir: Directory for checkpoints. If None, disables saving.
-            keep_k: How many checkpoints to retain when saving.
-            log_interval: Print/update frequency in steps.
-            accum_steps: Gradient accumulation steps per optimizer update (>=1).
-            clip_grad: Max norm for gradient clipping (None disables).
-            scheduler_step_on: Step scheduler per 'batch' or per 'epoch'.
-            guard_grad_nan: If True, raise when gradients contain NaN or Inf.
-            gpu_augmentor: Optional callable applied to batches after to_device to
-                populate view tensors (used for GPU-side augmentation).
-            timer: Optional StepTimer for telemetry logging.
-            budget_tracker: Optional BudgetTracker enforcing runtime limits.
-            hardness_monitor: Optional HardnessMonitor for top-K negative tracking.
-            stability_sentry: Optional StabilitySentry for crash diagnostics.
-            mixture_estimator: Optional MixtureStats instance for diagnostics logging.
-            topr_monitor: Optional Top-R diagnostics tracker.
-            third_moment_sketch: Optional ThirdMomentSketch for κ₃ diagnostics.
+            options: Container for optional knobs controlling telemetry, logging and
+                runtime behaviour. Legacy keyword arguments remain supported and
+                override values defined in ``options``.
         """
+        if options is None:
+            options = TrainerOptions()
+        if legacy_kwargs:
+            valid_fields = {field.name for field in dataclass_fields(TrainerOptions)}
+            unexpected = set(legacy_kwargs) - valid_fields
+            if unexpected:
+                unexpected_args = ", ".join(sorted(unexpected))
+                raise TypeError(
+                    "Trainer.__init__() got unexpected keyword arguments: "
+                    f"{unexpected_args}"
+                )
+            options = replace(options, **legacy_kwargs)
+        self._options = options
+
         self.method: _TrainableMethod = method
         self._method_impl = unwrap_ddp(method)
         self.optimizer = optimizer
         self.scheduler = scheduler
-        self.console = console or ConsoleMonitor()
-        self.device = device or torch.device(
+        self.console = options.console or ConsoleMonitor()
+        self.device = options.device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
-        self.scaler = scaler or AmpScaler(enabled=torch.cuda.is_available())
+        self.scaler = options.scaler or AmpScaler(enabled=torch.cuda.is_available())
         self.hooks: HookList = (
-            hooks if isinstance(hooks, HookList) else HookList([hooks] if hooks else [])
+            options.hooks
+            if isinstance(options.hooks, HookList)
+            else HookList([options.hooks] if options.hooks else [])
         )
-        self.save_dir = save_dir
-        self.keep_k = int(keep_k)
-        self.log_interval = int(log_interval)
-        if accum_steps < 1:
+        self.save_dir = options.save_dir
+        self.keep_k = int(options.keep_k)
+        self.log_interval = int(options.log_interval)
+        if options.accum_steps < 1:
             raise ValueError("accum_steps must be >= 1")
-        self.accum_steps = int(accum_steps)
-        self.clip_grad = clip_grad
-        if scheduler_step_on not in {"batch", "epoch"}:
+        self.accum_steps = int(options.accum_steps)
+        self.clip_grad = options.clip_grad
+        if options.scheduler_step_on not in {"batch", "epoch"}:
             raise ValueError("scheduler_step_on must be 'batch' or 'epoch'")
-        self.scheduler_step_on = scheduler_step_on
-        self.guard_grad_nan = bool(guard_grad_nan)
-        self.channels_last_inputs = bool(channels_last_inputs)
-        self._gpu_augmentor = gpu_augmentor
-        self.step_timer = timer
-        self.memory_monitor = memory_monitor
-        self.energy_monitor = energy_monitor
-        self.budget_tracker = budget_tracker
-        self.fidelity_probe = fidelity_probe
+        self.scheduler_step_on = options.scheduler_step_on
+        self.guard_grad_nan = bool(options.guard_grad_nan)
+        self.channels_last_inputs = bool(options.channels_last_inputs)
+        self._gpu_augmentor = options.gpu_augmentor
+        self.step_timer = options.timer
+        self.memory_monitor = options.memory_monitor
+        self.energy_monitor = options.energy_monitor
+        self.budget_tracker = options.budget_tracker
+        self.fidelity_probe = options.fidelity_probe
         self._fidelity_callback = (
-            getattr(fidelity_probe, "maybe_log", None) if fidelity_probe is not None else None
+            getattr(options.fidelity_probe, "maybe_log", None)
+            if options.fidelity_probe is not None
+            else None
         )
-        self.hardness_monitor = hardness_monitor
-        self.stability_sentry = stability_sentry
-        self.mixture_estimator = mixture_estimator
-        self.topr_monitor = topr_monitor
-        self.third_moment = third_moment_sketch
-        self.beta_controller = beta_controller
-        self.beta_controller_logger = beta_controller_logger
+        self.hardness_monitor = options.hardness_monitor
+        self.stability_sentry = options.stability_sentry
+        self.mixture_estimator = options.mixture_estimator
+        self.topr_monitor = options.topr_monitor
+        self.third_moment = options.third_moment_sketch
+        self.beta_controller = options.beta_controller
+        self.beta_controller_logger = options.beta_controller_logger
         try:
             env_steps = int(os.environ.get("MFCL_OOM_SEARCH_MAX_STEPS", "0"))
         except Exception:
